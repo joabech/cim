@@ -13,7 +13,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Text},
-    widgets::{Block, Borders, Clear, HighlightSpacing, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, HighlightSpacing, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, Wrap,
+    },
     Frame,
 };
 
@@ -30,10 +33,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),     // Source input (with padding)
-            Constraint::Length(12),    // Target list (10 items max)
-            Constraint::Min(5),        // Output pane (fills remaining)
-            Constraint::Length(1),     // Status bar
+            Constraint::Length(5),  // Source input (with padding)
+            Constraint::Length(12), // Target list (10 items max)
+            Constraint::Min(5),     // Output pane (fills remaining)
+            Constraint::Length(1),  // Status bar
         ])
         .split(area);
 
@@ -43,14 +46,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Target list section
     draw_target_list(frame, chunks[1], app);
 
-    // Output pane
+    // Output pane (needs mutable reference for height tracking)
     draw_output_pane(frame, chunks[2], app);
 
     // Status bar
     draw_status_bar(frame, chunks[3], app);
 
-    // Draw popup if open
-    if let Some(popup) = &app.init_popup {
+    // Draw popup if open (borrow popup separately to avoid borrow issues)
+    let popup_ref = app.init_popup.as_ref();
+    if let Some(popup) = popup_ref {
         draw_init_popup(frame, area, popup);
     }
 }
@@ -63,7 +67,7 @@ fn draw_source_input(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let block = Block::default()
-        .title("Source")
+        .title(" Source ")
         .borders(Borders::ALL)
         .border_style(input_style)
         .padding(ratatui::widgets::Padding::new(1, 1, 1, 1));
@@ -86,7 +90,7 @@ fn draw_target_list(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let block = Block::default()
-        .title("Available Targets")
+        .title(" Available Targets ")
         .borders(Borders::ALL)
         .border_style(list_style)
         .padding(ratatui::widgets::Padding::new(1, 1, 1, 1)); // left, right, top, bottom padding
@@ -121,8 +125,10 @@ fn draw_target_list(frame: &mut Frame, area: Rect, app: &App) {
     // Calculate visible range based on scroll offset
     let total_targets = app.targets.len();
     let visible_count = 10.min(total_targets);
-    let scroll_offset = app.target_scroll_offset.min(total_targets.saturating_sub(visible_count));
-    
+    let scroll_offset = app
+        .target_scroll_offset
+        .min(total_targets.saturating_sub(visible_count));
+
     // Create visible items with scrollbar indicators
     let items: Vec<ListItem> = app
         .targets
@@ -139,12 +145,14 @@ fn draw_target_list(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
-            
+
             // Add scroll indicators if needed
             let display_text = if total_targets > visible_count {
                 if i == scroll_offset && scroll_offset > 0 {
                     format!("↑ {}", target)
-                } else if i == scroll_offset + visible_count - 1 && scroll_offset + visible_count < total_targets {
+                } else if i == scroll_offset + visible_count - 1
+                    && scroll_offset + visible_count < total_targets
+                {
                     format!("{} ↓", target)
                 } else {
                     target.clone()
@@ -152,7 +160,7 @@ fn draw_target_list(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 target.clone()
             };
-            
+
             ListItem::new(display_text).style(style)
         })
         .collect();
@@ -169,17 +177,23 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         msg.clone()
     } else {
         match app.focus {
-            Focus::Output => "↑/↓: scroll | PgUp/PgDown: page | Home/End: top/bottom | Tab: next | q: quit".to_string(),
+            Focus::Output => {
+                "↑/↓: scroll | PgUp/PgDown: page | Home/End: top/bottom | Tab: next | q: quit"
+                    .to_string()
+            }
             _ => "Tab: switch focus | Enter: initialize | r: refresh | q: quit".to_string(),
         }
     };
 
-    let status = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray));
+    let status = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, area);
 }
 
-fn draw_output_pane(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_output_pane(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Update the pane height and width for auto-scroll calculations
+    app.output_pane_height = area.height;
+    app.output_pane_width = area.width.saturating_sub(4); // 2 borders + 2 padding
+
     let output_style = if app.focus == Focus::Output {
         Style::default().fg(Color::Yellow)
     } else {
@@ -187,7 +201,7 @@ fn draw_output_pane(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let block = Block::default()
-        .title("Output")
+        .title(" Output ")
         .borders(Borders::ALL)
         .border_style(output_style)
         .padding(ratatui::widgets::Padding::new(1, 1, 0, 0));
@@ -196,7 +210,8 @@ fn draw_output_pane(frame: &mut Frame, area: Rect, app: &App) {
         Text::from("Output from cim commands will appear here...")
     } else {
         // Split into lines and apply color coding based on content (case-insensitive)
-        let lines: Vec<Line> = app.output_text
+        let lines: Vec<Line> = app
+            .output_text
             .lines()
             .map(|line| {
                 let line_lower = line.to_lowercase();
@@ -221,6 +236,19 @@ fn draw_output_pane(frame: &mut Frame, area: Rect, app: &App) {
         .scroll((app.output_scroll, 0));
 
     frame.render_widget(paragraph, area);
+
+    // Render scrollbar over the right border (inside top/bottom corners)
+    let scrollbar_area = area.inner(Margin {
+        horizontal: 0,
+        vertical: 1,
+    });
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓")),
+        scrollbar_area,
+        &mut app.output_scrollbar_state,
+    );
 }
 
 fn draw_init_popup(frame: &mut Frame, area: Rect, popup: &InitPopupState) {
@@ -258,10 +286,9 @@ fn draw_init_popup(frame: &mut Frame, area: Rect, popup: &InitPopupState) {
             Constraint::Length(3), // Version
             Constraint::Length(3), // Workspace
             Constraint::Length(3), // Match
-            Constraint::Length(2), // Checkboxes row 1
-            Constraint::Length(2), // Checkboxes row 2
-            Constraint::Length(2), // Checkboxes row 3
-            Constraint::Length(2), // Checkboxes row 4
+            Constraint::Length(2), // Checkboxes row 1 (3 items)
+            Constraint::Length(2), // Checkboxes row 2 (3 items)
+            Constraint::Length(2), // Checkboxes row 3 (2 items)
             Constraint::Length(3), // Cert validation
             Constraint::Length(3), // Buttons
         ])
@@ -288,34 +315,125 @@ fn draw_init_popup(frame: &mut Frame, area: Rect, popup: &InitPopupState) {
         popup.focus == PopupFocus::MatchInput,
     );
 
-    // Checkboxes - row 1
+    // Checkboxes - row 1: No mirror | Force | Verbose
     let row1 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
+        .constraints([
+            Constraint::Fill(1),   // checkbox 1
+            Constraint::Length(3), // separator " | "
+            Constraint::Fill(1),   // checkbox 2
+            Constraint::Length(3), // separator " | "
+            Constraint::Fill(1),   // checkbox 3
+        ])
         .split(chunks[3]);
-    draw_checkbox(frame, row1[0], "No mirror", popup.no_mirror, popup.focus == PopupFocus::NoMirror);
-    draw_checkbox(frame, row1[1], "Force", popup.force, popup.focus == PopupFocus::Force);
-    draw_checkbox(frame, row1[2], "Verbose", popup.verbose, popup.focus == PopupFocus::Verbose);
-    draw_checkbox(frame, row1[3], "Install", popup.install, popup.focus == PopupFocus::Install);
+    draw_checkbox(
+        frame,
+        row1[0],
+        "[N]o mirror",
+        popup.no_mirror,
+        popup.focus == PopupFocus::NoMirror,
+    );
+    draw_separator(frame, row1[1]);
+    draw_checkbox(
+        frame,
+        row1[2],
+        "[F]orce",
+        popup.force,
+        popup.focus == PopupFocus::Force,
+    );
+    draw_separator(frame, row1[3]);
+    draw_checkbox(
+        frame,
+        row1[4],
+        "Ver[b]ose",
+        popup.verbose,
+        popup.focus == PopupFocus::Verbose,
+    );
 
-    // Checkboxes - row 2
+    // Checkboxes - row 2: Install | Full | No sudo
     let row2 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
+        .constraints([
+            Constraint::Fill(1),   // checkbox 1
+            Constraint::Length(3), // separator " | "
+            Constraint::Fill(1),   // checkbox 2
+            Constraint::Length(3), // separator " | "
+            Constraint::Fill(1),   // checkbox 3
+        ])
         .split(chunks[4]);
-    draw_checkbox(frame, row2[0], "Full", popup.full, popup.focus == PopupFocus::Full);
-    draw_checkbox(frame, row2[1], "No sudo", popup.no_sudo, popup.focus == PopupFocus::NoSudo);
-    draw_checkbox(frame, row2[2], "Symlink", popup.symlink, popup.focus == PopupFocus::Symlink);
-    draw_checkbox(frame, row2[3], "Yes (skip confirm)", popup.yes, popup.focus == PopupFocus::Yes);
+    draw_checkbox(
+        frame,
+        row2[0],
+        "[I]nstall",
+        popup.install,
+        popup.focus == PopupFocus::Install,
+    );
+    draw_separator(frame, row2[1]);
+    draw_checkbox(
+        frame,
+        row2[2],
+        "F[u]ll",
+        popup.full,
+        popup.focus == PopupFocus::Full,
+    );
+    draw_separator(frame, row2[3]);
+    draw_checkbox(
+        frame,
+        row2[4],
+        "No [s]udo",
+        popup.no_sudo,
+        popup.focus == PopupFocus::NoSudo,
+    );
+
+    // Checkboxes - row 3: Symlink | Yes (centered, 2 items)
+    let row3 = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Fill(1),   // spacer
+            Constraint::Fill(1),   // checkbox 1
+            Constraint::Length(3), // separator " | "
+            Constraint::Fill(1),   // checkbox 2
+            Constraint::Fill(1),   // spacer
+        ])
+        .split(chunks[5]);
+    draw_checkbox(
+        frame,
+        row3[1],
+        "Sym[l]ink",
+        popup.symlink,
+        popup.focus == PopupFocus::Symlink,
+    );
+    draw_separator(frame, row3[2]);
+    draw_checkbox(
+        frame,
+        row3[3],
+        "[Y]es (skip confirm)",
+        popup.yes,
+        popup.focus == PopupFocus::Yes,
+    );
 
     // Cert validation dropdown (collect area for later overlay drawing)
-    let cert_dropdown_area = draw_cert_dropdown(frame, chunks[7], popup);
+    let cert_dropdown_area = draw_cert_dropdown(frame, chunks[6], popup);
+
+    // Help footer with keyboard shortcuts
+    let help_text =
+        "Shortcuts: n,f,b,i,u,s,l,y,v,a,c,esc | Press key to toggle checkbox or focus field";
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    let help_area = Rect::new(
+        popup_area.x + 2,
+        popup_area.y + popup_area.height - 2,
+        popup_area.width - 4,
+        1,
+    );
+    frame.render_widget(help, help_area);
 
     // Buttons
     let button_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[8]);
+        .split(chunks[7]);
 
     let cancel_style = if popup.focus == PopupFocus::CancelButton {
         Style::default().bg(Color::Red).fg(Color::White)
@@ -368,7 +486,7 @@ fn draw_version_dropdown(frame: &mut Frame, area: Rect, popup: &InitPopupState) 
     };
 
     let block = Block::default()
-        .title("Version")
+        .title("[V]ersion")
         .borders(Borders::ALL)
         .border_style(style);
 
@@ -411,8 +529,7 @@ fn draw_version_dropdown_overlay(frame: &mut Frame, area: Rect, popup: &InitPopu
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).bg(Color::Black));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).bg(Color::Black));
     frame.render_widget(list, area);
 }
 
@@ -429,7 +546,7 @@ fn draw_cert_dropdown(frame: &mut Frame, area: Rect, popup: &InitPopupState) -> 
     let cert_text = cert_values[popup.selected_cert.min(2)];
 
     let block = Block::default()
-        .title("Cert Validation")
+        .title("Cert V[a]lidation")
         .borders(Borders::ALL)
         .border_style(style);
 
@@ -460,7 +577,7 @@ fn draw_cert_dropdown_overlay(frame: &mut Frame, area: Rect, popup: &InitPopupSt
     frame.render_widget(Clear, area);
 
     let cert_values = ["strict", "relaxed", "auto"];
-    
+
     let items: Vec<ListItem> = cert_values
         .iter()
         .enumerate()
@@ -474,8 +591,7 @@ fn draw_cert_dropdown_overlay(frame: &mut Frame, area: Rect, popup: &InitPopupSt
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).bg(Color::Black));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).bg(Color::Black));
     frame.render_widget(list, area);
 }
 
@@ -506,7 +622,9 @@ fn draw_checkbox(frame: &mut Frame, area: Rect, label: &str, checked: bool, focu
     let text = format!("{} {}", checkbox, label);
 
     let style = if focus {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else if checked {
         Style::default().fg(Color::Green)
     } else {
@@ -515,4 +633,11 @@ fn draw_checkbox(frame: &mut Frame, area: Rect, label: &str, checked: bool, focu
 
     let paragraph = Paragraph::new(text).style(style);
     frame.render_widget(paragraph, area);
+}
+
+fn draw_separator(frame: &mut Frame, area: Rect) {
+    let separator = Paragraph::new("|")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(separator, area);
 }

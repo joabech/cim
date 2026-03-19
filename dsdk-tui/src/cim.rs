@@ -15,7 +15,6 @@ use tokio::process::Command as TokioCommand;
 
 /// Fetch available targets using `cim list-targets`
 pub fn fetch_targets(source: &str) -> Result<Vec<String>> {
-
     let mut cmd = Command::new("cim");
     cmd.arg("list-targets");
 
@@ -23,9 +22,7 @@ pub fn fetch_targets(source: &str) -> Result<Vec<String>> {
         cmd.args(["--source", source]);
     }
 
-
     let output = cmd.output()?;
-
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -41,7 +38,6 @@ pub fn fetch_targets(source: &str) -> Result<Vec<String>> {
             targets.push(target.trim().to_string());
         }
     }
-
 
     Ok(targets)
 }

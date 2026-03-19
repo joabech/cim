@@ -12,6 +12,7 @@
 use anyhow::Result;
 use ratatui::prelude::*;
 
+use ratatui::widgets::{Paragraph, ScrollbarState, Wrap};
 use tokio::sync::mpsc;
 
 use crate::cim;
@@ -157,14 +158,17 @@ pub struct App {
     pub source_input: String,
     pub targets: Vec<String>,
     pub selected_target: usize,
-    pub target_scroll_offset: usize,  // For scrolling target list
+    pub target_scroll_offset: usize, // For scrolling target list
     pub focus: Focus,
     pub is_loading: bool,
     pub error_message: Option<String>,
     pub init_popup: Option<InitPopupState>,
     pub status_message: Option<String>,
     pub output_text: String,
-    pub output_scroll: u16,           // Vertical scroll offset for output pane
+    pub output_scroll: u16,      // Vertical scroll offset for output pane
+    pub output_pane_height: u16, // Height of the output pane (for auto-scroll logic)
+    pub output_pane_width: u16,  // Content width for rendered-row calculation
+    pub output_scrollbar_state: ScrollbarState,
 
     // Async channels
     target_rx: Option<mpsc::Receiver<Result<Vec<String>>>>,
@@ -176,7 +180,7 @@ impl App {
     pub fn new() -> Self {
         // Use the remote manifest repo that has versions
         let default_source = "https://github.com/joabech/cim-manifests.git".to_string();
-        
+
         let mut app = Self {
             source_input: default_source,
             targets: Vec::new(),
@@ -192,6 +196,9 @@ impl App {
             output_rx: None,
             output_text: String::new(),
             output_scroll: 0,
+            output_pane_height: 10, // Default, will be updated on first draw
+            output_pane_width: 76,  // Default, will be updated on first draw
+            output_scrollbar_state: ScrollbarState::default(),
         };
         app.refresh_targets();
         app
@@ -209,7 +216,7 @@ impl App {
 
             // Check async results
             self.check_async_results().await;
-            
+
             // Check for command output
             self.check_output();
         }
@@ -226,7 +233,9 @@ impl App {
 
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || cim::fetch_targets(&source)).await;
-            let _ = tx.send(result.unwrap_or_else(|e| Err(anyhow::anyhow!("Task panicked: {}", e)))).await;
+            let _ = tx
+                .send(result.unwrap_or_else(|e| Err(anyhow::anyhow!("Task panicked: {}", e))))
+                .await;
         });
     }
 
@@ -239,9 +248,7 @@ impl App {
     async fn check_async_results(&mut self) {
         // Check target fetch results
         if let Some(rx) = &mut self.target_rx {
-
             if let Ok(result) = rx.try_recv() {
-
                 self.is_loading = false;
                 self.target_rx = None;
 
@@ -251,7 +258,8 @@ impl App {
                         if self.selected_target >= self.targets.len() && !self.targets.is_empty() {
                             self.selected_target = 0;
                         }
-                        self.status_message = Some(format!("Loaded {} targets", self.targets.len()));
+                        self.status_message =
+                            Some(format!("Loaded {} targets", self.targets.len()));
                     }
                     Err(e) => {
                         self.error_message = Some(e.to_string());
@@ -318,8 +326,11 @@ impl App {
         self.version_rx = Some(rx);
 
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || cim::fetch_versions(&source, &target)).await;
-            let _ = tx.send(result.unwrap_or_else(|e| Err(anyhow::anyhow!("Task panicked: {}", e)))).await;
+            let result =
+                tokio::task::spawn_blocking(move || cim::fetch_versions(&source, &target)).await;
+            let _ = tx
+                .send(result.unwrap_or_else(|e| Err(anyhow::anyhow!("Task panicked: {}", e))))
+                .await;
         });
 
         self.init_popup = Some(popup);
@@ -363,12 +374,16 @@ impl App {
                 Some(popup.get_cert_validation()),
             ) {
                 Ok(mut child) => {
-                    self.status_message = Some(format!("Initializing workspace for '{}'...", target));
+                    self.status_message =
+                        Some(format!("Initializing workspace for '{}'...", target));
                     self.close_init_popup();
 
                     // Clear previous output
                     self.output_text.clear();
-                    self.output_text.push_str(&format!("=== Initializing workspace for '{}' ===\n\n", target));
+                    self.output_text.push_str(&format!(
+                        "=== Initializing workspace for '{}' ===\n\n",
+                        target
+                    ));
 
                     // Create channel for output lines
                     let (tx, rx) = mpsc::channel::<String>(100);
@@ -407,12 +422,17 @@ impl App {
                                 let msg = if status.success() {
                                     "\n=== Workspace initialized successfully ===".to_string()
                                 } else {
-                                    format!("\n=== Initialization failed with exit code: {:?} ===", status.code())
+                                    format!(
+                                        "\n=== Initialization failed with exit code: {:?} ===",
+                                        status.code()
+                                    )
                                 };
                                 let _ = tx.send(msg).await;
                             }
                             Err(e) => {
-                                let _ = tx.send(format!("\n=== Failed to wait for process: {} ===", e)).await;
+                                let _ = tx
+                                    .send(format!("\n=== Failed to wait for process: {} ===", e))
+                                    .await;
                             }
                         }
                     });
@@ -427,9 +447,18 @@ impl App {
     fn check_output(&mut self) {
         if let Some(rx) = &mut self.output_rx {
             // Drain all available lines
+            let mut new_content = false;
             while let Ok(line) = rx.try_recv() {
                 self.output_text.push_str(&line);
                 self.output_text.push('\n');
+                new_content = true;
+            }
+            // Auto-scroll to show latest content (bash-like behavior)
+            if new_content {
+                let total_rendered = self.rendered_row_count();
+                let visible = self.output_pane_height.saturating_sub(2);
+                self.output_scroll = total_rendered.saturating_sub(visible);
+                self.sync_scrollbar();
             }
         }
     }
@@ -437,21 +466,42 @@ impl App {
     // Output scrolling methods
     pub fn scroll_output_up(&mut self, lines: u16) {
         self.output_scroll = self.output_scroll.saturating_sub(lines);
+        self.sync_scrollbar();
     }
 
     pub fn scroll_output_down(&mut self, lines: u16) {
-        let total_lines = self.output_text.lines().count() as u16;
-        // Allow scrolling to show last line at top
-        let max_scroll = total_lines.saturating_sub(1);
+        let total_rendered = self.rendered_row_count();
+        let visible = self.output_pane_height.saturating_sub(2);
+        let max_scroll = total_rendered.saturating_sub(visible);
         self.output_scroll = (self.output_scroll + lines).min(max_scroll);
+        self.sync_scrollbar();
     }
 
     pub fn scroll_output_top(&mut self) {
         self.output_scroll = 0;
+        self.sync_scrollbar();
     }
 
     pub fn scroll_output_bottom(&mut self) {
-        let total_lines = self.output_text.lines().count() as u16;
-        self.output_scroll = total_lines.saturating_sub(1);
+        let total_rendered = self.rendered_row_count();
+        let visible = self.output_pane_height.saturating_sub(2);
+        self.output_scroll = total_rendered.saturating_sub(visible);
+        self.sync_scrollbar();
+    }
+
+    /// Compute total rendered rows using ratatui's own Paragraph::line_count so
+    /// the result is always consistent with what the widget actually renders.
+    fn rendered_row_count(&self) -> u16 {
+        let text = Text::from(self.output_text.as_str());
+        Paragraph::new(text)
+            .wrap(Wrap { trim: true })
+            .line_count(self.output_pane_width) as u16
+    }
+
+    /// Keep ScrollbarState in sync after any scroll or content change.
+    fn sync_scrollbar(&mut self) {
+        let total = self.rendered_row_count() as usize;
+        self.output_scrollbar_state =
+            ScrollbarState::new(total).position(self.output_scroll as usize);
     }
 }
