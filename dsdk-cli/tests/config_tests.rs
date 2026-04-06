@@ -47,6 +47,9 @@ fn test_load_config_with_repositories() {
             git_depends_on: None,
             build: Some(vec!["make".to_string()]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         },
         GitConfig {
             name: "repo2".to_string(),
@@ -56,6 +59,9 @@ fn test_load_config_with_repositories() {
             git_depends_on: None,
             build: None,
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         },
     ];
 
@@ -924,6 +930,9 @@ fn test_user_config_mirror_override_priority() {
         git_depends_on: None,
         build: None,
         documentation_dir: None,
+        optional: false,
+        build_entry: None,
+        toolchain_vars: None,
     }];
     write_sdk_config(&config, &config_path);
 

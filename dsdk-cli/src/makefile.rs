@@ -76,6 +76,9 @@ pub(crate) fn handle_makefile_command(no_dividers: bool) {
         Err(e) => messages::error(&format!("Failed to write Makefile: {}", e)),
     }
 
+    // Generate .cim/ directory (toolchain.mk, per-repo stubs, generated.mk)
+    generate_cim_directory(&workspace_path, &sdk_config);
+
     // NEW: Generate VS Code tasks.json
     if let Err(e) = vscode_tasks_manager::generate_tasks_json(&workspace_path, &output_path) {
         messages::info(&format!("Could not generate VS Code tasks.json: {}", e));
@@ -126,8 +129,29 @@ pub(crate) fn generate_makefile_content<T: config::SdkConfigCore>(
         makefile.push('\n');
     }
 
-    // Add makefile includes after variables so included files can reference them
-    if let Some(makefile_includes) = sdk_config.makefile_include() {
+    // Add makefile includes after variables so included files can reference them.
+    //
+    // New path: if `overlays:` is declared in sdk.yml, use the .cim/ system.
+    // .cim/generated.mk is the single entry point that includes toolchain.mk,
+    // explicit overlays, and any repo-provided .config/cim/cim.mk files.
+    //
+    // Legacy path: if only `makefile_include:` is present (no overlays:), emit
+    // the raw -include lines as before so existing manifests keep working.
+    let has_overlays = sdk_config
+        .overlays()
+        .as_ref()
+        .map(|o| !o.is_empty())
+        .unwrap_or(false);
+
+    if has_overlays {
+        if dividers {
+            makefile.push_str(&makefile_divider("Makefile includes (.cim/ system)"));
+        }
+        makefile.push_str(
+            "# Includes toolchain vars, overlays, and repo-provided .config/cim/cim.mk files.\n",
+        );
+        makefile.push_str("-include .cim/generated.mk\n\n");
+    } else if let Some(makefile_includes) = sdk_config.makefile_include() {
         if !makefile_includes.is_empty() {
             if dividers {
                 makefile.push_str(&makefile_divider("Makefile includes"));
@@ -692,6 +716,299 @@ pub(crate) fn add_install_target(makefile: &mut String, install: &config::Instal
     }
 }
 
+// ─── .cim/ directory generation ──────────────────────────────────────────────
+
+/// Generate the `.cim/` directory in the workspace with:
+///   - `toolchain.mk`  — single source of truth for toolchain variables
+///   - `<repo>.mk`     — per-repo generated stubs (only for repos with no
+///                       `.config/cim/cim.mk` and no registered overlay)
+///   - `generated.mk`  — single include index for the root Makefile
+fn generate_cim_directory(workspace_path: &std::path::Path, sdk_config: &config::SdkConfig) {
+    let cim_dir = workspace_path.join(".cim");
+    if let Err(e) = std::fs::create_dir_all(&cim_dir) {
+        messages::error(&format!("Failed to create .cim/ directory: {}", e));
+        return;
+    }
+
+    // 1. toolchain.mk
+    let toolchain_content = generate_toolchain_mk_content(sdk_config);
+    let toolchain_path = cim_dir.join("toolchain.mk");
+    if let Err(e) = std::fs::write(&toolchain_path, toolchain_content) {
+        messages::error(&format!("Failed to write .cim/toolchain.mk: {}", e));
+        return;
+    }
+
+    // Build a set of repo names that already have an explicit overlay registered,
+    // so we can skip generating a stub for those repos.
+    let repos_with_overlay: std::collections::HashSet<String> = sdk_config
+        .overlays
+        .as_ref()
+        .map(|ovs| ovs.iter().map(|o| o.for_repo.clone()).collect())
+        .unwrap_or_default();
+
+    // 2. Per-repo generated stubs (only when no overlay and no .config/cim/cim.mk)
+    for git in &sdk_config.gits {
+        let repo_cim_mk = workspace_path
+            .join(&git.name)
+            .join(".config/cim/cim.mk");
+        let has_overlay = repos_with_overlay.contains(&git.name);
+
+        if !repo_cim_mk.exists() && !has_overlay {
+            let stub_content = generate_git_stub_content(git);
+            let stub_filename = git.name.replace('/', "-") + ".mk";
+            let stub_path = cim_dir.join(&stub_filename);
+            if let Err(e) = std::fs::write(&stub_path, stub_content) {
+                messages::error(&format!("Failed to write .cim/{}: {}", stub_filename, e));
+            }
+        }
+    }
+
+    // 3. generated.mk (the single entry point included by the root Makefile)
+    let generated_content = generate_cim_generated_mk_content(sdk_config, workspace_path);
+    let generated_path = cim_dir.join("generated.mk");
+    if let Err(e) = std::fs::write(&generated_path, generated_content) {
+        messages::error(&format!("Failed to write .cim/generated.mk: {}", e));
+        return;
+    }
+
+    messages::success("Generated .cim/ directory (toolchain.mk, generated.mk)");
+}
+
+/// Derive a Make variable name from a toolchain destination path.
+///
+/// `toolchains/aarch64-bm`  →  `TOOLCHAIN_AARCH64_BM`
+/// `toolchains/arm-none`    →  `TOOLCHAIN_ARM_NONE`
+fn toolchain_var_name(destination: &str) -> String {
+    let last = std::path::Path::new(destination)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(destination);
+    let sanitized = last.to_uppercase().replace('-', "_").replace('.', "_");
+    format!("TOOLCHAIN_{}", sanitized)
+}
+
+/// Generate the content of `.cim/toolchain.mk`.
+///
+/// This file is the single source of truth for all toolchain variables in the
+/// workspace. Component makefiles (-include this via generated.mk) instead of
+/// each re-discovering paths themselves.
+fn generate_toolchain_mk_content(sdk_config: &config::SdkConfig) -> String {
+    let mut mk = String::new();
+
+    mk.push_str("# Generated by 'cim makefile' — do not edit. Re-run to update.\n");
+    mk.push_str("# Single source of truth for workspace toolchain variables.\n\n");
+
+    // Emit all manifest variables as weak assignments so host env vars override them
+    let vars = if let Some(raw_vars) = &sdk_config.variables {
+        dsdk_cli::workspace::resolve_variables(raw_vars)
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    if !vars.is_empty() {
+        mk.push_str("# Manifest variables\n");
+        let mut sorted: Vec<_> = vars.iter().collect();
+        sorted.sort_by_key(|(k, _)| k.as_str());
+        for (key, value) in &sorted {
+            mk.push_str(&format!("{} ?= {}\n", key, value));
+        }
+        mk.push('\n');
+    }
+
+    // Emit toolchain path variables derived from toolchain destinations
+    if let Some(toolchains) = &sdk_config.toolchains {
+        // Deduplicate destinations so multi-platform entries don't repeat the variable
+        let mut seen_destinations = std::collections::HashSet::new();
+        let mut toolchain_vars: Vec<(String, String)> = Vec::new();
+
+        for tc in toolchains {
+            if seen_destinations.insert(tc.destination.clone()) {
+                let var_name = toolchain_var_name(&tc.destination);
+                toolchain_vars.push((var_name, tc.destination.clone()));
+            }
+        }
+
+        if !toolchain_vars.is_empty() {
+            mk.push_str("# Toolchain path variables (derived from sdk.yml toolchains:)\n");
+            for (var_name, dest) in &toolchain_vars {
+                mk.push_str(&format!(
+                    "{} ?= $(WORKSPACE)/{}/bin\n",
+                    var_name, dest
+                ));
+            }
+            mk.push('\n');
+
+            // macOS: prepend Homebrew bin so modern bash/bison/flex are found
+            mk.push_str("# macOS: prepend Homebrew bin to PATH for modern tooling\n");
+            mk.push_str("ifeq ($(shell uname -s),Darwin)\n");
+            mk.push_str("export PATH := /opt/homebrew/bin:$(PATH)\n");
+            mk.push_str("endif\n\n");
+
+            // Export toolchain paths into PATH for all subsequent commands
+            mk.push_str("# Export toolchain bin directories into PATH\n");
+            // Build the PATH prefix from all toolchain var names
+            let path_prefix: Vec<String> = toolchain_vars
+                .iter()
+                .map(|(var_name, _)| format!("$({})", var_name))
+                .collect();
+            mk.push_str(&format!(
+                "export PATH := {}:$(PATH)\n\n",
+                path_prefix.join(":")
+            ));
+        }
+    }
+
+    // ccache detection — available to all repos
+    mk.push_str("# ccache detection (optional, speeds up recompilation)\n");
+    mk.push_str("CCACHE := $(shell command -v ccache 2>/dev/null)\n");
+
+    mk
+}
+
+/// Generate the content of a per-repo generated stub `.cim/<repo>.mk`.
+///
+/// Stubs are a mechanical translation of sdk.yml `build:` commands and are
+/// only generated for repos that have neither a `.config/cim/cim.mk` in the
+/// repo nor a registered overlay in sdk.yml `overlays:`.
+///
+/// **Do not edit generated stubs.** Put customisations in
+/// `<repo>/.config/cim/cim.mk` (repos you own) or in an explicit overlay
+/// registered via sdk.yml `overlays:` (third-party repos).
+fn generate_git_stub_content(git: &config::GitConfig) -> String {
+    let mut mk = String::new();
+    let safe_name = git.name.replace('/', "-");
+
+    mk.push_str(&format!(
+        "# Generated stub for '{}' — do not edit.\n",
+        git.name
+    ));
+    mk.push_str("# To add custom build logic for a repo you own, create:\n");
+    mk.push_str(&format!(
+        "#   {}/.config/cim/cim.mk\n",
+        git.name
+    ));
+    mk.push_str("# For third-party repos, register an overlay in sdk.yml overlays:.\n");
+    mk.push_str("# Re-run 'cim makefile' to regenerate after sdk.yml changes.\n\n");
+
+    if let Some(build_cmds) = &git.build {
+        if !build_cmds.is_empty() {
+            let dep_str = git
+                .build_depends_on
+                .as_ref()
+                .map(|d| d.join(" "))
+                .unwrap_or_default();
+
+            mk.push_str(&format!(".PHONY: {}-build {}-clean\n", safe_name, safe_name));
+
+            if dep_str.is_empty() {
+                mk.push_str(&format!("{}-build:\n", safe_name));
+            } else {
+                mk.push_str(&format!("{}-build: {}\n", safe_name, dep_str));
+            }
+
+            for cmd in build_cmds {
+                let rendered = render_command_for_makefile(cmd);
+                mk.push_str(&format!("\t{}\n", rendered));
+            }
+            mk.push('\n');
+
+            mk.push_str(&format!("{}-clean:\n", safe_name));
+            mk.push_str(&format!(
+                "\t@echo \"No clean defined for {} — add a clean target in .config/cim/cim.mk\"\n",
+                git.name
+            ));
+            mk.push('\n');
+        }
+    }
+
+    mk
+}
+
+/// Generate the content of `.cim/generated.mk`.
+///
+/// This is the single file included by the root Makefile (`-include .cim/generated.mk`).
+/// It pulls in, in order:
+///   1. toolchain.mk   — workspace toolchain variables
+///   2. Overlay files  — from sdk.yml `overlays:` (manually maintained, typically in build.git)
+///   3. Repo cim.mk    — from `<repo>/.config/cim/cim.mk` (self-describing repos)
+///   4. Stubs          — for repos with no cim.mk and no overlay
+fn generate_cim_generated_mk_content(
+    sdk_config: &config::SdkConfig,
+    workspace_path: &std::path::Path,
+) -> String {
+    let mut mk = String::new();
+
+    mk.push_str("# Auto-generated by 'cim makefile' — do not edit. Re-run to update.\n");
+    mk.push_str(
+        "# Single include entry point. The root Makefile uses: -include .cim/generated.mk\n\n",
+    );
+
+    // 1. Toolchain vars — always first so everything below can use them
+    mk.push_str("# Workspace toolchain variables\n");
+    mk.push_str("-include $(WORKSPACE)/.cim/toolchain.mk\n\n");
+
+    // Build overlay lookup: repo_name → source path
+    let overlay_map: std::collections::HashMap<String, String> = sdk_config
+        .overlays
+        .as_ref()
+        .map(|ovs| {
+            ovs.iter()
+                .map(|o| (o.for_repo.clone(), o.source.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 2. Overlays (third-party repos — manually maintained, registered in sdk.yml overlays:)
+    if !overlay_map.is_empty() {
+        mk.push_str("# Overlays: manually maintained build adaptors for third-party repos\n");
+        // Output in a stable order (sorted by repo name)
+        let mut sorted_overlays: Vec<_> = overlay_map.iter().collect();
+        sorted_overlays.sort_by_key(|(k, _)| k.as_str());
+        for (repo, source) in &sorted_overlays {
+            mk.push_str(&format!(
+                "-include $(WORKSPACE)/{}  # overlay for {}\n",
+                source, repo
+            ));
+        }
+        mk.push('\n');
+    }
+
+    // 3 & 4. Per-repo: prefer .config/cim/cim.mk, fall back to generated stub
+    let has_repo_entries = !sdk_config.gits.is_empty();
+    if has_repo_entries {
+        mk.push_str(
+            "# Per-repo build adaptors (.config/cim/cim.mk preferred; generated stub as fallback)\n",
+        );
+        for git in &sdk_config.gits {
+            let repo_cim_mk = workspace_path
+                .join(&git.name)
+                .join(".config/cim/cim.mk");
+            let has_overlay = overlay_map.contains_key(&git.name);
+
+            if has_overlay {
+                // Overlay already included above; skip here to avoid duplicate targets
+                continue;
+            }
+
+            if repo_cim_mk.exists() {
+                mk.push_str(&format!(
+                    "-include $(WORKSPACE)/{}/.config/cim/cim.mk\n",
+                    git.name
+                ));
+            } else {
+                let stub_filename = git.name.replace('/', "-") + ".mk";
+                mk.push_str(&format!(
+                    "-include $(WORKSPACE)/.cim/{}  # generated stub\n",
+                    stub_filename
+                ));
+            }
+        }
+        mk.push('\n');
+    }
+
+    mk
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +1023,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -734,6 +1052,9 @@ mod tests {
             git_depends_on: None,
             build: Some(vec!["make".to_string(), "make install".to_string()]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         let config = config::SdkConfig {
@@ -743,6 +1064,7 @@ mod tests {
             gits: vec![git_config],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -769,6 +1091,9 @@ mod tests {
             git_depends_on: None,
             build: Some(vec!["@echo Building base".to_string()]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         let git2 = config::GitConfig {
@@ -779,6 +1104,9 @@ mod tests {
             git_depends_on: None,
             build: Some(vec!["# This is a comment".to_string(), "make".to_string()]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         let config = config::SdkConfig {
@@ -788,6 +1116,7 @@ mod tests {
             gits: vec![git1, git2],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -816,6 +1145,9 @@ mod tests {
             git_depends_on: None,
             build: None,
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         add_makefile_target(&mut makefile, &git_config);
@@ -840,6 +1172,9 @@ mod tests {
                 "make".to_string(),
             ]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         add_makefile_target(&mut makefile, &git_config);
@@ -862,6 +1197,9 @@ mod tests {
             git_depends_on: None,
             build: Some(vec![]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         let config = config::SdkConfig {
@@ -871,6 +1209,7 @@ mod tests {
             gits: vec![git_config],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -895,6 +1234,9 @@ mod tests {
             git_depends_on: None,
             build: Some(vec!["echo hello".to_string()]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         let mut makefile = String::new();
@@ -912,6 +1254,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: Some(config::SdkTarget::Commands(vec![
                 "ln -sf qemu_v8.mk build/Makefile".to_string(),
                 "cd build && make -j3 toolchains".to_string(),
@@ -945,6 +1288,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: Some(config::SdkTarget::Commands(vec![
                 "# Setup toolchain".to_string(),
                 "@echo Setting up environment".to_string(),
@@ -983,6 +1327,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -1008,6 +1353,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -1055,6 +1401,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: Some(config::SdkTarget::Commands(vec![
                 "cargo test --release".to_string(),
@@ -1091,6 +1438,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: Some(config::SdkTarget::Commands(vec![
                 "# Run unit tests".to_string(),
@@ -1129,6 +1477,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -1154,6 +1503,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -1201,6 +1551,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: Some(config::SdkTarget::Commands(vec![
                 "make configure".to_string()
             ])),
@@ -1283,6 +1634,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: None,
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -1339,6 +1691,7 @@ mod tests {
             gits: vec![],
             copy_files: None,
             makefile_include: Some(vec!["include build/extra.mk".to_string()]),
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -1368,6 +1721,9 @@ mod tests {
             git_depends_on: None,
             build: Some(vec!["make".to_string()]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         let mut vars = std::collections::HashMap::new();
@@ -1385,6 +1741,7 @@ mod tests {
             gits: vec![git_config],
             copy_files: None,
             makefile_include: Some(vec!["include extra.mk".to_string()]),
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,
@@ -1439,6 +1796,9 @@ mod tests {
             git_depends_on: None,
             build: Some(vec!["make".to_string()]),
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         };
 
         let mut vars = std::collections::HashMap::new();
@@ -1456,6 +1816,7 @@ mod tests {
             gits: vec![git_config],
             copy_files: None,
             makefile_include: Some(vec!["include extra.mk".to_string()]),
+            overlays: None,
             envsetup: None,
             test: None,
             clean: None,

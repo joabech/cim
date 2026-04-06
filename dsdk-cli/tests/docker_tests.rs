@@ -51,6 +51,9 @@ fn test_dockerfile_generation_basic() {
         git_depends_on: None,
         build: Some(vec!["make".to_string()]),
         documentation_dir: None,
+        optional: false,
+        build_entry: None,
+        toolchain_vars: None,
     }];
 
     let yaml = serde_yaml::to_string(&config).unwrap();
@@ -124,6 +127,9 @@ fn test_dockerfile_with_https_urls() {
                 git_depends_on: None,
                 build: None,
                 documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
             },
             GitConfig {
                 name: "repo2".to_string(),
@@ -133,12 +139,16 @@ fn test_dockerfile_with_https_urls() {
                 git_depends_on: None,
                 build: None,
                 documentation_dir: None,
+                optional: false,
+                build_entry: None,
+                toolchain_vars: None,
             },
         ],
         toolchains: None,
         install: None,
         copy_files: None,
         makefile_include: None,
+        overlays: None,
         envsetup: None,
         test: None,
         clean: None,

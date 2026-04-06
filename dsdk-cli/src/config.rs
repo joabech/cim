@@ -193,6 +193,7 @@ pub trait SdkConfigCore {
     fn gits(&self) -> &Vec<GitConfig>;
     fn install(&self) -> &Option<Vec<InstallConfig>>;
     fn makefile_include(&self) -> &Option<Vec<String>>;
+    fn overlays(&self) -> &Option<Vec<OverlayConfig>>;
     fn envsetup(&self) -> &Option<SdkTarget>;
     fn test(&self) -> &Option<SdkTarget>;
     fn clean(&self) -> &Option<SdkTarget>;
@@ -221,6 +222,30 @@ pub struct GitConfig {
     /// If specified, this directory will be searched for index.rst in addition to default locations
     #[serde(default)]
     pub documentation_dir: Option<String>,
+    /// If true, targets for this repo skip gracefully when the repo directory is absent.
+    /// Useful for workspaces where users clone only a subset of repos.
+    #[serde(default)]
+    pub optional: bool,
+    /// Path to the Makefile or build entry point within the repo (default: Makefile).
+    /// Used when generating per-repo stubs in .cim/<repo>.mk.
+    #[serde(default)]
+    pub build_entry: Option<String>,
+    /// Manifest variable names to inject as Make variables when building this repo.
+    /// If unset, all manifest variables are available via .cim/toolchain.mk.
+    #[serde(default)]
+    pub toolchain_vars: Option<Vec<String>>,
+}
+
+/// An overlay pairs a manually written .mk file (typically in build.git) with the
+/// repo it augments. Overlays are the right place for third-party repos where you
+/// cannot add a <repo>/.config/cim/cim.mk file.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OverlayConfig {
+    /// Path to the .mk file, relative to the workspace root (e.g. "build/uboot.mk")
+    pub source: String,
+    /// Name of the git repo this overlay is for (must match a name in `gits:`)
+    #[serde(rename = "for")]
+    pub for_repo: String,
 }
 
 /// Configuration for installing a component/tool in the workspace.
@@ -479,6 +504,11 @@ pub struct SdkConfig {
     pub install: Option<Vec<InstallConfig>>,
     #[serde(default)]
     pub makefile_include: Option<Vec<String>>,
+    /// Explicit overlay files for repos that cannot ship their own .config/cim/cim.mk
+    /// (e.g. third-party upstream repos). Each overlay is a manually written .mk file
+    /// registered against a specific git repo name.
+    #[serde(default)]
+    pub overlays: Option<Vec<OverlayConfig>>,
     #[serde(default, deserialize_with = "deserialize_sdk_target")]
     pub envsetup: Option<SdkTarget>,
     #[serde(default, deserialize_with = "deserialize_sdk_target")]
@@ -511,6 +541,10 @@ impl SdkConfigCore for SdkConfig {
 
     fn makefile_include(&self) -> &Option<Vec<String>> {
         &self.makefile_include
+    }
+
+    fn overlays(&self) -> &Option<Vec<OverlayConfig>> {
+        &self.overlays
     }
 
     fn envsetup(&self) -> &Option<SdkTarget> {
@@ -1590,6 +1624,9 @@ mirror = "/only/mirror/set"
             git_depends_on: git_depends_on.map(|v| v.into_iter().map(String::from).collect()),
             build: None,
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         }
     }
 
@@ -1684,6 +1721,9 @@ mirror = "/only/mirror/set"
             git_depends_on: None,
             build: None,
             documentation_dir: None,
+            optional: false,
+            build_entry: None,
+            toolchain_vars: None,
         }];
         let tiers = resolve_clone_order(&gits).unwrap();
         assert_eq!(tiers.len(), 1);

@@ -1344,6 +1344,10 @@ impl config::SdkConfigCore for FilteredSdkConfig {
     fn variables(&self) -> &Option<std::collections::HashMap<String, String>> {
         &None
     }
+
+    fn overlays(&self) -> &Option<Vec<config::OverlayConfig>> {
+        &None
+    }
 }
 
 /// Compile a match pattern string into a regex.

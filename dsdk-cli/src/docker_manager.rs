@@ -851,6 +851,9 @@ mod tests {
                     git_depends_on: None,
                     build: None,
                     documentation_dir: None,
+                    optional: false,
+                    build_entry: None,
+                    toolchain_vars: None,
                 },
                 GitConfig {
                     name: "repo2".to_string(),
@@ -860,6 +863,9 @@ mod tests {
                     git_depends_on: None,
                     build: None,
                     documentation_dir: None,
+                    optional: false,
+                    build_entry: None,
+                    toolchain_vars: None,
                 },
             ],
             toolchains: None,
@@ -872,6 +878,7 @@ mod tests {
             clean: None,
             flash: None,
             variables: None,
+            overlays: None,
         };
 
         assert!(DockerManager::has_ssh_repositories(&config_with_ssh));
@@ -887,6 +894,9 @@ mod tests {
                 git_depends_on: None,
                 build: None,
                 documentation_dir: None,
+                optional: false,
+                build_entry: None,
+                toolchain_vars: None,
             }],
             copy_files: None,
             install: None,
@@ -897,6 +907,7 @@ mod tests {
             clean: None,
             flash: None,
             variables: None,
+            overlays: None,
         };
 
         assert!(!DockerManager::has_ssh_repositories(&config_no_ssh));
@@ -987,6 +998,9 @@ mod tests {
                 git_depends_on: None,
                 build: None,
                 documentation_dir: None,
+                optional: false,
+                build_entry: None,
+                toolchain_vars: None,
             }],
             copy_files: None,
             install: None,
@@ -997,6 +1011,7 @@ mod tests {
             clean: None,
             flash: None,
             variables: None,
+            overlays: None,
         };
 
         let os_deps = OsDependencies {
