@@ -799,32 +799,7 @@ fn generate_cim_directory(workspace_path: &std::path::Path, sdk_config: &config:
         return;
     }
 
-    // Build a set of repo names that already have an explicit overlay registered,
-    // so we can skip generating a stub for those repos.
-    let repos_with_overlay: std::collections::HashSet<String> = sdk_config
-        .overlays
-        .as_ref()
-        .map(|ovs| ovs.iter().map(|o| o.for_repo.clone()).collect())
-        .unwrap_or_default();
-
-    // 2. Per-repo generated stubs (only when no overlay and no .config/cim/cim.mk)
-    for git in &sdk_config.gits {
-        let repo_cim_mk = workspace_path
-            .join(&git.name)
-            .join(".config/cim/cim.mk");
-        let has_overlay = repos_with_overlay.contains(&git.name);
-
-        if !repo_cim_mk.exists() && !has_overlay {
-            let stub_content = generate_git_stub_content(git);
-            let stub_filename = git.name.replace('/', "-") + ".mk";
-            let stub_path = cim_dir.join(&stub_filename);
-            if let Err(e) = std::fs::write(&stub_path, stub_content) {
-                messages::error(&format!("Failed to write .cim/{}: {}", stub_filename, e));
-            }
-        }
-    }
-
-    // 3. generated.mk (the single entry point included by the root Makefile)
+    // 2. generated.mk (the single entry point included by the root Makefile)
     let generated_content = generate_cim_generated_mk_content(sdk_config, workspace_path);
     let generated_path = cim_dir.join("generated.mk");
     if let Err(e) = std::fs::write(&generated_path, generated_content) {
@@ -892,10 +867,7 @@ fn generate_toolchain_mk_content(sdk_config: &config::SdkConfig) -> String {
         if !toolchain_vars.is_empty() {
             mk.push_str("# Toolchain path variables (derived from sdk.yml toolchains:)\n");
             for (var_name, dest) in &toolchain_vars {
-                mk.push_str(&format!(
-                    "{} ?= $(WORKSPACE)/{}/bin\n",
-                    var_name, dest
-                ));
+                mk.push_str(&format!("{} ?= $(WORKSPACE)/{}/bin\n", var_name, dest));
             }
             mk.push('\n');
 
@@ -935,55 +907,6 @@ fn generate_toolchain_mk_content(sdk_config: &config::SdkConfig) -> String {
 /// **Do not edit generated stubs.** Put customisations in
 /// `<repo>/.config/cim/cim.mk` (repos you own) or in an explicit overlay
 /// registered via sdk.yml `overlays:` (third-party repos).
-fn generate_git_stub_content(git: &config::GitConfig) -> String {
-    let mut mk = String::new();
-    let safe_name = git.name.replace('/', "-");
-
-    mk.push_str(&format!(
-        "# Generated stub for '{}' — do not edit.\n",
-        git.name
-    ));
-    mk.push_str("# To add custom build logic for a repo you own, create:\n");
-    mk.push_str(&format!(
-        "#   {}/.config/cim/cim.mk\n",
-        git.name
-    ));
-    mk.push_str("# For third-party repos, register an overlay in sdk.yml overlays:.\n");
-    mk.push_str("# Re-run 'cim makefile' to regenerate after sdk.yml changes.\n\n");
-
-    if let Some(build_cmds) = &git.build {
-        if !build_cmds.is_empty() {
-            let dep_str = git
-                .build_depends_on
-                .as_ref()
-                .map(|d| d.join(" "))
-                .unwrap_or_default();
-
-            mk.push_str(&format!(".PHONY: {}-build {}-clean\n", safe_name, safe_name));
-
-            if dep_str.is_empty() {
-                mk.push_str(&format!("{}-build:\n", safe_name));
-            } else {
-                mk.push_str(&format!("{}-build: {}\n", safe_name, dep_str));
-            }
-
-            for cmd in build_cmds {
-                let rendered = render_command_for_makefile(cmd);
-                mk.push_str(&format!("\t{}\n", rendered));
-            }
-            mk.push('\n');
-
-            mk.push_str(&format!("{}-clean:\n", safe_name));
-            mk.push_str(&format!(
-                "\t@echo \"No clean defined for {} — add a clean target in .config/cim/cim.mk\"\n",
-                git.name
-            ));
-            mk.push('\n');
-        }
-    }
-
-    mk
-}
 
 /// Generate the content of `.cim/generated.mk`.
 ///
@@ -1034,35 +957,24 @@ fn generate_cim_generated_mk_content(
         mk.push('\n');
     }
 
-    // 3 & 4. Per-repo: prefer .config/cim/cim.mk, fall back to generated stub
-    let has_repo_entries = !sdk_config.gits.is_empty();
-    if has_repo_entries {
-        mk.push_str(
-            "# Per-repo build adaptors (.config/cim/cim.mk preferred; generated stub as fallback)\n",
-        );
-        for git in &sdk_config.gits {
-            let repo_cim_mk = workspace_path
+    // Per-repo: include .config/cim/cim.mk when present (overlays already handled above)
+    let cim_mk_includes: Vec<String> = sdk_config
+        .gits
+        .iter()
+        .filter(|git| !overlay_map.contains_key(&git.name))
+        .filter(|git| {
+            workspace_path
                 .join(&git.name)
-                .join(".config/cim/cim.mk");
-            let has_overlay = overlay_map.contains_key(&git.name);
+                .join(".config/cim/cim.mk")
+                .exists()
+        })
+        .map(|git| format!("-include $(WORKSPACE)/{}/.config/cim/cim.mk\n", git.name))
+        .collect();
 
-            if has_overlay {
-                // Overlay already included above; skip here to avoid duplicate targets
-                continue;
-            }
-
-            if repo_cim_mk.exists() {
-                mk.push_str(&format!(
-                    "-include $(WORKSPACE)/{}/.config/cim/cim.mk\n",
-                    git.name
-                ));
-            } else {
-                let stub_filename = git.name.replace('/', "-") + ".mk";
-                mk.push_str(&format!(
-                    "-include $(WORKSPACE)/.cim/{}  # generated stub\n",
-                    stub_filename
-                ));
-            }
+    if !cim_mk_includes.is_empty() {
+        mk.push_str("# Per-repo build adaptors (repo-owned .config/cim/cim.mk)\n");
+        for line in &cim_mk_includes {
+            mk.push_str(line);
         }
         mk.push('\n');
     }
@@ -1143,9 +1055,8 @@ pub(crate) fn generate_ninja_content(
 
     // Header
     ninja.push_str("# Auto-generated by 'cim makefile --ninja' — do not edit. Re-run to update.\n");
-    ninja.push_str(
-        "# Encodes the workspace repo dependency graph for parallel builds via ninja.\n",
-    );
+    ninja
+        .push_str("# Encodes the workspace repo dependency graph for parallel builds via ninja.\n");
     ninja.push_str("# Each repo's internal build system (e.g. recursive make) is unchanged;\n");
     ninja.push_str("# ninja only controls the order in which repos start building.\n\n");
 
@@ -2157,10 +2068,7 @@ mod tests {
                     name: "build".to_string(),
                     url: "https://github.com/example/build.git".to_string(),
                     commit: "main".to_string(),
-                    build_depends_on: Some(vec![
-                        "u-boot".to_string(),
-                        "hello-world".to_string(),
-                    ]),
+                    build_depends_on: Some(vec!["u-boot".to_string(), "hello-world".to_string()]),
                     git_depends_on: None,
                     build: Some(vec!["$(MAKE) hello-world-build".to_string()]),
                     documentation_dir: None,
@@ -2179,7 +2087,7 @@ mod tests {
                 "$(MAKE) -f build/Makefile qemu WORKSPACE=$(WORKSPACE)".to_string(),
             ])),
             clean: Some(config::SdkTarget::Commands(vec![
-                "$(MAKE) uboot-clean".to_string(),
+                "$(MAKE) uboot-clean".to_string()
             ])),
             build: Some(config::SdkTarget::CommandsWithDeps {
                 commands: vec![

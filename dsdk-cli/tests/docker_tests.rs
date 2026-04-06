@@ -127,9 +127,9 @@ fn test_dockerfile_with_https_urls() {
                 git_depends_on: None,
                 build: None,
                 documentation_dir: None,
-            optional: false,
-            build_entry: None,
-            toolchain_vars: None,
+                optional: false,
+                build_entry: None,
+                toolchain_vars: None,
             },
             GitConfig {
                 name: "repo2".to_string(),

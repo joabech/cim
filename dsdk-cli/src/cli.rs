@@ -161,7 +161,10 @@ pub enum Commands {
         /// Also generate .cim/build.ninja for parallel repo builds.
         /// sdk-build will auto-detect ninja and use it when available,
         /// falling back to sequential make when ninja is not installed.
-        #[arg(long, help = "Generate .cim/build.ninja for parallel repo builds via ninja")]
+        #[arg(
+            long,
+            help = "Generate .cim/build.ninja for parallel repo builds via ninja"
+        )]
         ninja: bool,
     },
     /// Add a new git repository to configuration
