@@ -118,8 +118,8 @@ fn main() {
                 cert_validation.as_deref(),
             );
         }
-        Commands::Makefile { no_dividers } => {
-            handle_makefile_command(*no_dividers);
+        Commands::Makefile { no_dividers, ninja } => {
+            handle_makefile_command(*no_dividers, *ninja);
         }
         Commands::Add { name, url, commit } => {
             handle_add_command(name, url, commit);

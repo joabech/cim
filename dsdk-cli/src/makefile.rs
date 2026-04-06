@@ -15,7 +15,7 @@ use dsdk_cli::{config, messages, vscode_tasks_manager};
 const WORKSPACE_VARIABLE: &str = "WORKSPACE := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))";
 
 /// Generate a Makefile from the SDK configuration
-pub(crate) fn handle_makefile_command(no_dividers: bool) {
+pub(crate) fn handle_makefile_command(no_dividers: bool, ninja: bool) {
     // Must be run from within a workspace
     let workspace_path = match get_current_workspace() {
         Ok(path) => path,
@@ -69,7 +69,7 @@ pub(crate) fn handle_makefile_command(no_dividers: bool) {
     }
 
     let dividers = !effective_no_dividers;
-    let makefile = generate_makefile_content(&sdk_config, dividers);
+    let makefile = generate_makefile_content(&sdk_config, dividers, ninja);
 
     match std::fs::write(&output_path, makefile) {
         Ok(_) => messages::success(&format!("Makefile written to {}", output_path.display())),
@@ -78,6 +78,11 @@ pub(crate) fn handle_makefile_command(no_dividers: bool) {
 
     // Generate .cim/ directory (toolchain.mk, per-repo stubs, generated.mk)
     generate_cim_directory(&workspace_path, &sdk_config);
+
+    // Optionally generate .cim/build.ninja for parallel repo builds
+    if ninja {
+        generate_ninja_file(&workspace_path, &sdk_config);
+    }
 
     // NEW: Generate VS Code tasks.json
     if let Err(e) = vscode_tasks_manager::generate_tasks_json(&workspace_path, &output_path) {
@@ -99,6 +104,7 @@ fn makefile_divider(title: &str) -> String {
 pub(crate) fn generate_makefile_content<T: config::SdkConfigCore>(
     sdk_config: &T,
     dividers: bool,
+    ninja: bool,
 ) -> String {
     let mut makefile = String::new();
 
@@ -127,6 +133,13 @@ pub(crate) fn generate_makefile_content<T: config::SdkConfigCore>(
             makefile.push_str(&format!("{} ?= {}\n", key, value));
         }
         makefile.push('\n');
+    }
+
+    // When --ninja was used to generate, emit variables for auto-detection
+    if ninja {
+        makefile.push_str("# Ninja auto-detection: sdk-build uses ninja when available\n");
+        makefile.push_str("NINJA := $(shell command -v ninja 2>/dev/null)\n");
+        makefile.push_str("NINJA_BUILD_FILE := $(WORKSPACE)/.cim/build.ninja\n\n");
     }
 
     // Add makefile includes after variables so included files can reference them.
@@ -228,7 +241,7 @@ pub(crate) fn generate_makefile_content<T: config::SdkConfigCore>(
     // Add sdk-build target (always create, fallback if missing)
     match sdk_config.build() {
         Some(build_target) => {
-            add_build_target(&mut makefile, build_target);
+            add_build_target(&mut makefile, build_target, ninja);
         }
         _ => {
             makefile.push_str("sdk-build:\n\t@echo \"No build commands defined in sdk.yml\"\n\n");
@@ -454,38 +467,86 @@ pub(crate) fn add_clean_target(makefile: &mut String, clean_target: &config::Sdk
     makefile.push('\n');
 }
 
-/// Add the sdk-build target to the Makefile
-pub(crate) fn add_build_target(makefile: &mut String, build_target: &config::SdkTarget) {
-    // Add target with dependencies
-    if let Some(deps) = build_target.depends_on() {
-        makefile.push_str(&format!("sdk-build: {}\n", deps.join(" ")));
-    } else {
+/// Add the sdk-build target to the Makefile.
+///
+/// When `ninja` is true, the recipe auto-detects ninja at make-time:
+/// - If ninja + `.cim/build.ninja` are present: delegates entirely to ninja,
+///   which handles the full dependency graph and runs independent repos in
+///   parallel. No Make prerequisites — ninja owns the build graph in this path.
+/// - Fallback: runs git dep targets sequentially, then sdk-build commands.
+///   Deps are emitted explicitly so the fallback is self-contained.
+///
+/// When `ninja` is false: standard Make behavior with prerequisites.
+pub(crate) fn add_build_target(
+    makefile: &mut String,
+    build_target: &config::SdkTarget,
+    ninja: bool,
+) {
+    if ninja {
+        // In ninja mode, sdk-build has NO Make prerequisites.
+        // Ninja handles the full dependency graph when available.
+        // The fallback path calls git dep targets explicitly.
         makefile.push_str("sdk-build:\n");
-    }
-
-    for command in build_target.commands() {
-        let rendered = render_command_for_makefile(command);
-        let trimmed = rendered.trim();
-
-        // Skip comment lines (starting with #)
-        if trimmed.starts_with('#') {
-            // Write as a Makefile comment (with tab like other commands)
-            makefile.push_str(&format!(
-                "\t#{}\n",
-                trimmed.strip_prefix('#').unwrap().trim_start()
-            ));
-            continue;
+        makefile.push_str("ifneq ($(NINJA),)\n");
+        makefile.push_str("ifneq ($(wildcard $(NINJA_BUILD_FILE)),)\n");
+        makefile.push_str("\t@echo \"[cim] Using ninja for parallel repo builds\"\n");
+        makefile.push_str("\t$(NINJA) -f $(NINJA_BUILD_FILE) sdk-build\n");
+        makefile.push_str("else\n");
+        // Sequential fallback: call each dep target explicitly
+        if let Some(deps) = build_target.depends_on() {
+            for dep in deps {
+                makefile.push_str(&format!("\t$(MAKE) {}\n", dep));
+            }
+        }
+        for command in build_target.commands() {
+            let rendered = render_command_for_makefile(command);
+            makefile.push_str(&format!("\t{}\n", rendered.trim()));
+        }
+        makefile.push_str("endif\n");
+        makefile.push_str("else\n");
+        // Same sequential fallback when ninja binary is not installed
+        if let Some(deps) = build_target.depends_on() {
+            for dep in deps {
+                makefile.push_str(&format!("\t$(MAKE) {}\n", dep));
+            }
+        }
+        for command in build_target.commands() {
+            let rendered = render_command_for_makefile(command);
+            makefile.push_str(&format!("\t{}\n", rendered.trim()));
+        }
+        makefile.push_str("endif\n");
+    } else {
+        // Standard Make: declare prerequisites so Make runs them before the recipe.
+        if let Some(deps) = build_target.depends_on() {
+            makefile.push_str(&format!("sdk-build: {}\n", deps.join(" ")));
+        } else {
+            makefile.push_str("sdk-build:\n");
         }
 
-        // Handle echo commands with @ prefix (like build commands)
-        if trimmed.starts_with('@') {
-            // Just pass through the @ command as-is, it's already properly formatted
-            makefile.push_str(&format!("\t{}\n", trimmed));
-            continue;
-        }
+        for command in build_target.commands() {
+            let rendered = render_command_for_makefile(command);
+            let trimmed = rendered.trim();
 
-        // Add regular command
-        makefile.push_str(&format!("\t{}\n", rendered));
+            // Skip comment lines (starting with #)
+            if trimmed.starts_with('#') {
+                // Write as a Makefile comment (with tab like other commands)
+                makefile.push_str(&format!(
+                    "\t#{}\n",
+                    trimmed.strip_prefix('#').unwrap().trim_start()
+                ));
+                continue;
+            }
+
+            // Handle echo commands with @ prefix (like build commands)
+            if trimmed.starts_with('@') {
+                // Just pass through the @ command as-is, it's already properly formatted
+                makefile.push_str(&format!("\t{}\n", trimmed));
+                continue;
+            }
+
+            // Add regular command
+            makefile.push_str(&format!("\t{}\n", rendered));
+        }
     }
 
     makefile.push('\n');
@@ -1009,6 +1070,220 @@ fn generate_cim_generated_mk_content(
     mk
 }
 
+/// Render a command string for inclusion in a Ninja build rule.
+///
+/// Ninja uses `$var` and `${var}` as its own variable expansion syntax, and
+/// `$(var)` as an alternative. Everything with a single `$` is intercepted by
+/// Ninja before the string reaches the shell. To get a literal `$` in the
+/// shell command, write `$$` in the Ninja file.
+///
+/// This function translates Make-style variable references for Ninja:
+///
+/// - `$(MAKE)` → `${MAKE}`: Ninja expands `${MAKE}` using the `MAKE` Ninja
+///   variable, which is defined in the generated ninja file as `make`.
+///   The shell receives the literal string `make`, not a variable reference.
+///
+/// - `$(WORKSPACE)` → `${workspace}`: Similarly, Ninja expands this using the
+///   `workspace` Ninja variable (absolute path defined at generation time).
+///
+/// - Other `$(VAR)` → `$$(VAR)`: Ninja sees `$$` and emits a literal `$`
+///   to the shell, which then sees `$(VAR)` and can expand it from its env.
+///
+/// Also applies `${{ VAR }}` → `$(VAR)` substitution before escaping.
+pub(crate) fn render_command_for_ninja(cmd: &str) -> String {
+    // First apply manifest variable substitution (${{ VAR }} → $(VAR))
+    let make_form = render_command_for_makefile(cmd);
+    // $(MAKE) → ${MAKE}: Ninja variable "MAKE = make" defined in ninja file
+    let s = make_form.replace("$(MAKE)", "${MAKE}");
+    // $(WORKSPACE) → ${workspace}: Ninja variable with absolute path
+    let s = s.replace("$(WORKSPACE)", "${workspace}");
+    // All remaining $(...) → $$(...) so Ninja passes them to the shell literally
+    s.replace("$(", "$$(")
+}
+
+// ─── Ninja file generation ────────────────────────────────────────────────────
+
+/// Generate `.cim/build.ninja` and write it to the workspace.
+///
+/// The Ninja file encodes the same workspace-level dependency graph as the root
+/// Makefile but lets Ninja exploit it for parallel builds. Independent repos
+/// (those with no `build_depends_on`) start simultaneously; repos that depend
+/// on others wait until all their dependencies finish.
+///
+/// Each repo's *internal* build system is unchanged — Ninja simply calls
+/// `make <target>` for each repo in the right order. The toolchain variables
+/// (CROSS_COMPILE, PATH, etc.) are available because each `make <target>` call
+/// reads the workspace root Makefile which `-include .cim/generated.mk`.
+fn generate_ninja_file(workspace_path: &std::path::Path, sdk_config: &config::SdkConfig) {
+    let cim_dir = workspace_path.join(".cim");
+    let ninja_path = cim_dir.join("build.ninja");
+    let content = generate_ninja_content(workspace_path, sdk_config);
+    match std::fs::write(&ninja_path, content) {
+        Ok(_) => messages::success(&format!(
+            "Generated .cim/build.ninja (parallel builds via ninja)"
+        )),
+        Err(e) => messages::error(&format!("Failed to write .cim/build.ninja: {}", e)),
+    }
+}
+
+/// Generate the content of `.cim/build.ninja`.
+///
+/// Ninja syntax primer used here:
+///   `rule NAME`   — defines a command pattern with variables
+///   `build T: R D` — target T built by rule R, depending on D
+///   `build T: phony` — T is always out-of-date (like .PHONY in Make)
+///   `$var`        — Ninja variable reference (single $)
+///   `$(MAKE)`     — passed through to the shell as-is (Ninja ≠ Make)
+pub(crate) fn generate_ninja_content(
+    workspace_path: &std::path::Path,
+    sdk_config: &config::SdkConfig,
+) -> String {
+    let workspace_str = workspace_path.to_string_lossy();
+    let mut ninja = String::new();
+
+    // Header
+    ninja.push_str("# Auto-generated by 'cim makefile --ninja' — do not edit. Re-run to update.\n");
+    ninja.push_str(
+        "# Encodes the workspace repo dependency graph for parallel builds via ninja.\n",
+    );
+    ninja.push_str("# Each repo's internal build system (e.g. recursive make) is unchanged;\n");
+    ninja.push_str("# ninja only controls the order in which repos start building.\n\n");
+
+    // Ninja variables: workspace (absolute path) and MAKE (resolved at generation time)
+    // Using Ninja variables avoids any shell escaping issues for these well-known values.
+    ninja.push_str(&format!("workspace = {}\n", workspace_str));
+    // MAKE: use the actual make binary path if available, fall back to "make"
+    let make_bin = std::env::var("MAKE").unwrap_or_else(|_| "make".to_string());
+    ninja.push_str(&format!("MAKE = {}\n", make_bin));
+
+    // Manifest variables (same as root Makefile)
+    let vars = if let Some(raw_vars) = &sdk_config.variables {
+        dsdk_cli::workspace::resolve_variables(raw_vars)
+    } else {
+        std::collections::HashMap::new()
+    };
+    if !vars.is_empty() {
+        let mut sorted: Vec<_> = vars.iter().collect();
+        sorted.sort_by_key(|(k, _)| k.as_str());
+        for (key, value) in &sorted {
+            // Ninja variables are lowercase by convention; emit both for shell commands
+            ninja.push_str(&format!("{} = {}\n", key.to_lowercase(), value));
+        }
+    }
+    ninja.push('\n');
+
+    // Rule: run a make target from the workspace root.
+    // $(MAKE) in the command string is passed through to the shell, not interpreted by Ninja.
+    // The shell expands $(MAKE) to the make binary (inherited from environment).
+    ninja.push_str("rule make_target\n");
+    ninja.push_str("  command = cd $workspace && $cmd\n");
+    ninja.push_str("  description = [$name] $cmd\n\n");
+
+    // ── Per-repo build targets ────────────────────────────────────────────────
+    if !sdk_config.gits.is_empty() {
+        ninja.push_str("# Repository build targets\n");
+        for git in &sdk_config.gits {
+            let deps = git
+                .build_depends_on
+                .as_ref()
+                .map(|d| d.join(" "))
+                .unwrap_or_default();
+
+            let target_line = if deps.is_empty() {
+                format!("build {}: make_target\n", git.name)
+            } else {
+                format!("build {}: make_target {}\n", git.name, deps)
+            };
+            ninja.push_str(&target_line);
+            ninja.push_str(&format!("  name = {}\n", git.name));
+
+            // Join multiple commands with ' && ' (run sequentially within one Ninja rule)
+            let cmd = if let Some(build_cmds) = &git.build {
+                build_cmds
+                    .iter()
+                    .map(|c| render_command_for_ninja(c))
+                    .collect::<Vec<_>>()
+                    .join(" && ")
+            } else {
+                // Default: call the git target by name via make
+                format!("$$(MAKE) {}", git.name)
+            };
+            ninja.push_str(&format!("  cmd = {}\n\n", cmd));
+        }
+    }
+
+    // ── SDK-level targets ─────────────────────────────────────────────────────
+    ninja.push_str("# SDK-level targets\n");
+
+    // sdk-build: runs after all repo deps are built; commands from sdk.yml build:
+    if let Some(build_target) = &sdk_config.build {
+        let deps = build_target
+            .depends_on()
+            .map(|d| d.join(" "))
+            .unwrap_or_default();
+        let target_line = if deps.is_empty() {
+            "build sdk-build: make_target\n".to_string()
+        } else {
+            format!("build sdk-build: make_target {}\n", deps)
+        };
+        ninja.push_str(&target_line);
+        ninja.push_str("  name = sdk-build\n");
+        let cmd = build_target
+            .commands()
+            .iter()
+            .map(|c| render_command_for_ninja(c))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        ninja.push_str(&format!("  cmd = {}\n\n", cmd));
+    } else {
+        ninja.push_str("build sdk-build: phony\n\n");
+    }
+
+    // sdk-clean
+    if let Some(clean_target) = &sdk_config.clean {
+        let cmd = clean_target
+            .commands()
+            .iter()
+            .map(|c| render_command_for_ninja(c))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        ninja.push_str("build sdk-clean: make_target\n");
+        ninja.push_str("  name = sdk-clean\n");
+        ninja.push_str(&format!("  cmd = {}\n\n", cmd));
+    }
+
+    // sdk-test
+    if let Some(test_target) = &sdk_config.test {
+        let cmd = test_target
+            .commands()
+            .iter()
+            .map(|c| render_command_for_ninja(c))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        ninja.push_str("build sdk-test: make_target sdk-build\n");
+        ninja.push_str("  name = sdk-test\n");
+        ninja.push_str(&format!("  cmd = {}\n\n", cmd));
+    }
+
+    // sdk-flash
+    if let Some(flash_target) = &sdk_config.flash {
+        let cmd = flash_target
+            .commands()
+            .iter()
+            .map(|c| render_command_for_ninja(c))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        ninja.push_str("build sdk-flash: make_target\n");
+        ninja.push_str("  name = sdk-flash\n");
+        ninja.push_str(&format!("  cmd = {}\n\n", cmd));
+    }
+
+    // Default target
+    ninja.push_str("default sdk-build\n");
+
+    ninja
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,7 +1307,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
         assert!(
             makefile.starts_with(&format!("{}\n\n", WORKSPACE_VARIABLE)),
             "Expected WORKSPACE variable first in Makefile, got:\n{}",
@@ -1073,7 +1348,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
         assert!(makefile.contains(".PHONY: all"));
         assert!(makefile.contains("all: sdk-build"));
         assert!(makefile.contains("test-repo:"));
@@ -1125,7 +1400,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
         assert!(makefile.contains("all: sdk-build"));
         assert!(makefile.contains("base-repo:"));
         assert!(makefile.contains("dep-repo: base-repo"));
@@ -1218,7 +1493,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
         assert!(makefile.contains("empty-build:"));
 
         // Test with multiple dependencies
@@ -1266,7 +1541,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Check that .PHONY includes sdk-envsetup
         assert!(makefile.contains(".PHONY: all sdk-envsetup"));
@@ -1303,7 +1578,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Check that comments are preserved
         assert!(makefile.contains("#Setup toolchain"));
@@ -1336,7 +1611,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Should not include sdk-envsetup in PHONY or create target
         assert!(makefile.contains(".PHONY: all"));
@@ -1362,7 +1637,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Should not include sdk-envsetup
         assert!(makefile.contains(".PHONY: all"));
@@ -1413,7 +1688,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Check that .PHONY includes sdk-test
         assert!(makefile.contains(".PHONY: all sdk-test"));
@@ -1453,7 +1728,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Check that comments are preserved
         assert!(makefile.contains("#Run unit tests"));
@@ -1486,7 +1761,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Should not include sdk-test in PHONY or create target
         assert!(makefile.contains(".PHONY: all"));
@@ -1512,7 +1787,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Should not include sdk-test
         assert!(makefile.contains(".PHONY: all"));
@@ -1562,7 +1837,7 @@ mod tests {
             variables: None,
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Check that .PHONY includes both targets
         assert!(makefile.contains(".PHONY: all sdk-envsetup sdk-test"));
@@ -1643,7 +1918,7 @@ mod tests {
             variables: Some(vars),
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         let workspace_index = makefile
             .find(WORKSPACE_VARIABLE)
@@ -1700,7 +1975,7 @@ mod tests {
             variables: Some(vars),
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         let vars_pos = makefile.find("?=").expect("variables block missing");
         let include_pos = makefile.find("-include").expect("include block missing");
@@ -1750,7 +2025,7 @@ mod tests {
             variables: Some(vars),
         };
 
-        let makefile = generate_makefile_content(&config, true);
+        let makefile = generate_makefile_content(&config, true, false);
 
         // Verify divider banners are present
         assert!(
@@ -1825,7 +2100,7 @@ mod tests {
             variables: Some(vars),
         };
 
-        let makefile = generate_makefile_content(&config, false);
+        let makefile = generate_makefile_content(&config, false, false);
 
         // Verify no divider banners are present
         assert!(
@@ -1844,5 +2119,155 @@ mod tests {
              # Test Section\n\
              ################################################################################\n"
         );
+    }
+
+    // ── Ninja generation tests ────────────────────────────────────────────────
+
+    fn make_ninja_sdk_config(workspace: &std::path::Path) -> config::SdkConfig {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("CROSS_COMPILE".to_string(), "aarch64-none-elf-".to_string());
+        config::SdkConfig {
+            mirror: workspace.join("mirror"),
+            gits: vec![
+                config::GitConfig {
+                    name: "u-boot".to_string(),
+                    url: "https://github.com/u-boot/u-boot.git".to_string(),
+                    commit: "master".to_string(),
+                    build_depends_on: None,
+                    git_depends_on: None,
+                    build: Some(vec!["$(MAKE) uboot-build".to_string()]),
+                    documentation_dir: None,
+                    optional: false,
+                    build_entry: None,
+                    toolchain_vars: None,
+                },
+                config::GitConfig {
+                    name: "hello-world".to_string(),
+                    url: "https://github.com/example/hello-world.git".to_string(),
+                    commit: "main".to_string(),
+                    build_depends_on: None,
+                    git_depends_on: None,
+                    build: Some(vec!["$(MAKE) hello-world-build".to_string()]),
+                    documentation_dir: None,
+                    optional: false,
+                    build_entry: None,
+                    toolchain_vars: None,
+                },
+                config::GitConfig {
+                    name: "build".to_string(),
+                    url: "https://github.com/example/build.git".to_string(),
+                    commit: "main".to_string(),
+                    build_depends_on: Some(vec![
+                        "u-boot".to_string(),
+                        "hello-world".to_string(),
+                    ]),
+                    git_depends_on: None,
+                    build: Some(vec!["$(MAKE) hello-world-build".to_string()]),
+                    documentation_dir: None,
+                    optional: false,
+                    build_entry: None,
+                    toolchain_vars: None,
+                },
+            ],
+            toolchains: None,
+            copy_files: None,
+            install: None,
+            makefile_include: None,
+            overlays: None,
+            envsetup: None,
+            test: Some(config::SdkTarget::Commands(vec![
+                "$(MAKE) -f build/Makefile qemu WORKSPACE=$(WORKSPACE)".to_string(),
+            ])),
+            clean: Some(config::SdkTarget::Commands(vec![
+                "$(MAKE) uboot-clean".to_string(),
+            ])),
+            build: Some(config::SdkTarget::CommandsWithDeps {
+                commands: vec![
+                    "@echo Building".to_string(),
+                    "$(MAKE) -C build qemu-hello WORKSPACE=$(WORKSPACE)".to_string(),
+                ],
+                depends_on: Some(vec!["u-boot".to_string(), "hello-world".to_string()]),
+            }),
+            flash: None,
+            variables: Some(vars),
+        }
+    }
+
+    #[test]
+    fn test_generate_ninja_content_basic() {
+        let workspace = PathBuf::from("/workspace/test");
+        let sdk_config = make_ninja_sdk_config(&workspace);
+        let content = generate_ninja_content(&workspace, &sdk_config);
+
+        // Header
+        assert!(content.contains("Auto-generated by 'cim makefile --ninja'"));
+        // Workspace variable
+        assert!(content.contains("workspace = /workspace/test"));
+        // Manifest variable (lowercase)
+        assert!(content.contains("cross_compile = aarch64-none-elf-"));
+        // Rule definition
+        assert!(content.contains("rule make_target"));
+        assert!(content.contains("command = cd $workspace && $cmd"));
+        // Repo targets present
+        assert!(content.contains("build u-boot: make_target"));
+        assert!(content.contains("build hello-world: make_target"));
+        // Default target
+        assert!(content.contains("default sdk-build"));
+    }
+
+    #[test]
+    fn test_generate_ninja_deps_order() {
+        let workspace = PathBuf::from("/workspace/test");
+        let sdk_config = make_ninja_sdk_config(&workspace);
+        let content = generate_ninja_content(&workspace, &sdk_config);
+
+        // u-boot and hello-world have no deps — no trailing names
+        assert!(content.contains("build u-boot: make_target\n"));
+        assert!(content.contains("build hello-world: make_target\n"));
+        // build depends on u-boot and hello-world
+        assert!(content.contains("build build: make_target u-boot hello-world\n"));
+        // sdk-build depends on u-boot and hello-world (from SdkTarget depends_on)
+        assert!(content.contains("build sdk-build: make_target u-boot hello-world\n"));
+    }
+
+    #[test]
+    fn test_ninja_command_join() {
+        let workspace = PathBuf::from("/workspace/test");
+        let mut sdk_config = make_ninja_sdk_config(&workspace);
+        // Give u-boot two build commands
+        sdk_config.gits[0].build = Some(vec![
+            "$(MAKE) defconfig".to_string(),
+            "$(MAKE) all".to_string(),
+        ]);
+        let content = generate_ninja_content(&workspace, &sdk_config);
+        // $(MAKE) → ${MAKE} (Ninja variable), commands joined with ' && '
+        assert!(content.contains("${MAKE} defconfig && ${MAKE} all"));
+    }
+
+    #[test]
+    fn test_makefile_ninja_autodetect() {
+        let workspace = PathBuf::from("/tmp/test");
+        let sdk_config = make_ninja_sdk_config(&workspace);
+        let makefile = generate_makefile_content(&sdk_config, false, true);
+
+        // Should have NINJA detection variables
+        assert!(makefile.contains("NINJA := $(shell command -v ninja 2>/dev/null)"));
+        assert!(makefile.contains("NINJA_BUILD_FILE := $(WORKSPACE)/.cim/build.ninja"));
+        // sdk-build should contain the ifneq auto-detect block
+        assert!(makefile.contains("ifneq ($(NINJA),)"));
+        assert!(makefile.contains("ifneq ($(wildcard $(NINJA_BUILD_FILE)),)"));
+        assert!(makefile.contains("$(NINJA) -f $(NINJA_BUILD_FILE) sdk-build"));
+    }
+
+    #[test]
+    fn test_makefile_no_ninja_autodetect_without_flag() {
+        let workspace = PathBuf::from("/tmp/test");
+        let sdk_config = make_ninja_sdk_config(&workspace);
+        let makefile = generate_makefile_content(&sdk_config, false, false);
+
+        // Without --ninja, no detection variables or conditional blocks
+        assert!(!makefile.contains("NINJA :="));
+        assert!(!makefile.contains("NINJA_BUILD_FILE"));
+        assert!(!makefile.contains("ifneq ($(NINJA),)"));
     }
 }

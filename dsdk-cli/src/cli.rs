@@ -158,6 +158,11 @@ pub enum Commands {
         /// Skip section dividers in the generated Makefile
         #[arg(long, help = "Do not add section dividers to the generated Makefile")]
         no_dividers: bool,
+        /// Also generate .cim/build.ninja for parallel repo builds.
+        /// sdk-build will auto-detect ninja and use it when available,
+        /// falling back to sequential make when ninja is not installed.
+        #[arg(long, help = "Generate .cim/build.ninja for parallel repo builds via ninja")]
+        ninja: bool,
     },
     /// Add a new git repository to configuration
     Add {
