@@ -26,7 +26,8 @@ use dsdk_cli::workspace::{
     CreateWorkspaceMarkerParams,
 };
 use dsdk_cli::{
-    config, doc_manager, git_operations, messages, toolchain_manager, vscode_tasks_manager,
+    config, doc_manager, fragment, git_operations, messages, toolchain_manager,
+    vscode_tasks_manager,
 };
 use regex::Regex;
 use std::env;
@@ -848,6 +849,95 @@ pub(crate) fn handle_init_command(config: InitConfig) {
             return;
         }
     };
+
+    // --- Fragment application ---
+    // 1. Discover manifests-repo fragments (from targets/<target>/fragments/)
+    // 2. Load CLI-specified fragments (--fragment flags)
+    // 3. Apply all fragments in order (manifests-repo first, then CLI)
+    if !config._no_fragments {
+        if let Some(config_dir) = config_path.parent() {
+            let fragments_dir = config_dir.join("fragments");
+            match fragment::discover_fragments_in_dir(&fragments_dir) {
+                Ok(paths) => {
+                    for path in &paths {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        messages::verbose(&format!("Discovered manifests-repo fragment: {}", name));
+                    }
+                    let mut fragments = Vec::new();
+                    for path in &paths {
+                        match config::load_fragment(path) {
+                            Ok(frag) => fragments.push(frag),
+                            Err(e) => {
+                                messages::error(&format!(
+                                    "Failed to load fragment {}: {}",
+                                    path.display(),
+                                    e
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                    if !fragments.is_empty() {
+                        messages::info(&format!(
+                            "Applying {} manifest fragment(s)",
+                            fragments.len()
+                        ));
+                        if let Err(e) = fragment::apply_fragments(&mut sdk_config, &fragments) {
+                            messages::error(&format!("Failed to apply fragments: {}", e));
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    messages::verbose(&format!("Could not read fragments directory: {}", e));
+                }
+            }
+        }
+    }
+
+    // Apply CLI-specified fragments (--fragment flags)
+    if !config._fragments.is_empty() {
+        let mut cli_fragments = Vec::new();
+        for path in &config._fragments {
+            match config::load_fragment(path) {
+                Ok(frag) => {
+                    let name = frag
+                        .fragment
+                        .as_ref()
+                        .and_then(|m| m.name.as_deref())
+                        .unwrap_or_else(|| {
+                            path.file_name()
+                                .unwrap_or_default()
+                                .to_str()
+                                .unwrap_or("<unknown>")
+                        });
+                    messages::verbose(&format!("Loaded CLI fragment: {}", name));
+                    cli_fragments.push(frag);
+                }
+                Err(e) => {
+                    messages::error(&format!(
+                        "Failed to load fragment {}: {}",
+                        path.display(),
+                        e
+                    ));
+                    return;
+                }
+            }
+        }
+        if !cli_fragments.is_empty() {
+            messages::info(&format!("Applying {} CLI fragment(s)", cli_fragments.len()));
+            if let Err(e) = fragment::apply_fragments(&mut sdk_config, &cli_fragments) {
+                messages::error(&format!("Failed to apply CLI fragments: {}", e));
+                return;
+            }
+        }
+    }
+
+    // Validate merged config after fragment application
+    let warnings = fragment::validate_merged_config(&sdk_config);
+    for warning in &warnings {
+        messages::info(&format!("Warning: {}", warning));
+    }
 
     // Apply user config overrides if present
     if let Some(ref uc) = user_config {
