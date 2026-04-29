@@ -13,6 +13,7 @@ pub mod config;
 pub mod doc_manager;
 pub mod docker_manager;
 pub mod download;
+pub mod fragment;
 pub mod git_manager;
 pub mod git_operations;
 pub mod messages;
