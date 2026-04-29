@@ -318,6 +318,8 @@ pub(crate) fn handle_update_command(
     match_pattern: Option<&str>,
     verbose: bool,
     _cert_validation: Option<&str>,
+    _fragments: &[PathBuf],
+    _no_fragments: bool,
 ) {
     // Start background version check so it runs concurrently with the update
     let version_check = spawn_version_check();

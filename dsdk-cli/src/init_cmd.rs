@@ -663,6 +663,8 @@ pub(crate) struct InitConfig<'a> {
     pub(crate) symlink: bool,
     pub(crate) yes: bool,
     pub(crate) _cert_validation: Option<&'a str>,
+    pub(crate) _fragments: Vec<PathBuf>,
+    pub(crate) _no_fragments: bool,
 }
 
 /// Initialize a new workspace
