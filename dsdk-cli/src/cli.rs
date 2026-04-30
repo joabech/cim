@@ -284,13 +284,14 @@ pub enum Commands {
 
     /// Merge multiple SDK targets into a single configuration
     Merge {
-        /// Target names to merge (comma-separated or repeatable)
+        /// Target names to merge (space-separated, comma-separated, or repeatable)
         #[arg(
             short,
             long,
+            num_args = 1..,
             value_delimiter = ',',
             required = true,
-            help = "Target names to merge (comma-separated or repeatable)"
+            help = "Targets to merge (space/comma-separated or repeated --targets)"
         )]
         targets: Vec<String>,
         /// Output directory for the merged target

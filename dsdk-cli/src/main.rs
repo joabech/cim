@@ -191,9 +191,14 @@ fn handle_merge_command(
     fragments: &[std::path::PathBuf],
     dry_run: bool,
 ) {
-    use dsdk_cli::config::{load_config, load_fragment, SdkConfig};
+    use dsdk_cli::config::{
+        load_config, load_fragment, load_os_dependencies, load_python_dependencies, SdkConfig,
+    };
     use dsdk_cli::fragment::{apply_fragment, validate_merged_config};
-    use dsdk_cli::merge::merge_targets;
+    use dsdk_cli::merge::{
+        format_merged_yaml, format_os_dependencies_yaml, format_python_dependencies_yaml,
+        merge_os_dependencies, merge_python_dependencies, merge_targets,
+    };
     use dsdk_cli::workspace::get_default_source;
 
     if targets.len() < 2 {
@@ -221,40 +226,61 @@ fn handle_merge_command(
         targets.join(", ")
     ));
 
-    // Load all target configurations
-    let mut configs: Vec<(String, SdkConfig)> = Vec::new();
+    // Load all target configurations and track their directories
+    let mut configs: Vec<(String, SdkConfig, std::path::PathBuf)> = Vec::new();
     for target_name in targets {
-        let config_path = match init_cmd::resolve_target_config(target_name, config_root) {
-            Ok(p) => p,
-            Err(e) => {
-                messages::error(&format!(
-                    "Failed to resolve target '{}': {}",
-                    target_name, e
-                ));
-                std::process::exit(1);
+        // Support both target names and direct paths to target directories
+        let config_path = {
+            let as_path = std::path::Path::new(target_name);
+            let sdk_yml = as_path.join("sdk.yml");
+            if sdk_yml.exists() {
+                sdk_yml
+            } else if as_path.exists() && as_path.is_file() {
+                as_path.to_path_buf()
+            } else {
+                match init_cmd::resolve_target_config(target_name, config_root) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        messages::error(&format!(
+                            "Failed to resolve target '{}': {}",
+                            target_name, e
+                        ));
+                        std::process::exit(1);
+                    }
+                }
             }
         };
+
+        let target_dir = config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+
+        let display_name = target_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| target_name.clone());
 
         let config = match load_config(&config_path) {
             Ok(c) => c,
             Err(e) => {
-                messages::error(&format!("Failed to load target '{}': {}", target_name, e));
+                messages::error(&format!("Failed to load target '{}': {}", display_name, e));
                 std::process::exit(1);
             }
         };
 
         messages::info(&format!(
             "  Loaded '{}' ({} gits)",
-            target_name,
+            display_name,
             config.gits.len()
         ));
-        configs.push((target_name.clone(), config));
+        configs.push((display_name, config, target_dir));
     }
 
     // Build reference pairs for merge
     let target_refs: Vec<(&str, &SdkConfig)> = configs
         .iter()
-        .map(|(name, cfg)| (name.as_str(), cfg))
+        .map(|(name, cfg, _)| (name.as_str(), cfg))
         .collect();
 
     let mut result = merge_targets(&target_refs, mirror_override);
@@ -312,19 +338,55 @@ fn handle_merge_command(
         messages::info(&format!("  Note: {}", note));
     }
 
-    if dry_run {
-        messages::status("Dry run — merged configuration:");
-        match serde_yaml::to_string(&result.config) {
-            Ok(yaml) => println!("{}", yaml),
-            Err(e) => {
-                messages::error(&format!("Failed to serialize merged config: {}", e));
-                std::process::exit(1);
+    // Format the merged sdk.yml using the clean YAML emitter
+    let target_names: Vec<&str> = configs.iter().map(|(n, _, _)| n.as_str()).collect();
+    let merged_yaml = format_merged_yaml(&result.config, &target_names);
+
+    // Load and merge os-dependencies.yml files
+    let mut os_deps_list = Vec::new();
+    for (name, _, target_dir) in &configs {
+        let os_deps_path = target_dir.join("os-dependencies.yml");
+        if os_deps_path.exists() {
+            match load_os_dependencies(&os_deps_path) {
+                Ok(deps) => {
+                    os_deps_list.push((name.clone(), deps));
+                }
+                Err(e) => {
+                    messages::info(&format!(
+                        "  Warning: Failed to load os-dependencies.yml from '{}': {}",
+                        name, e
+                    ));
+                }
             }
         }
+    }
+
+    // Load and merge python-dependencies.yml files
+    let mut python_deps_list = Vec::new();
+    for (name, _, target_dir) in &configs {
+        let py_deps_path = target_dir.join("python-dependencies.yml");
+        if py_deps_path.exists() {
+            match load_python_dependencies(&py_deps_path) {
+                Ok(deps) => {
+                    python_deps_list.push((name.clone(), deps));
+                }
+                Err(e) => {
+                    messages::info(&format!(
+                        "  Warning: Failed to load python-dependencies.yml from '{}': {}",
+                        name, e
+                    ));
+                }
+            }
+        }
+    }
+
+    if dry_run {
+        messages::status("Dry run — merged configuration:");
+        println!("{}", merged_yaml);
         return;
     }
 
-    // Write the merged sdk.yml
+    // Create output directory
     if let Err(e) = std::fs::create_dir_all(output) {
         messages::error(&format!(
             "Failed to create output directory '{}': {}",
@@ -334,18 +396,47 @@ fn handle_merge_command(
         std::process::exit(1);
     }
 
+    // Write merged sdk.yml
     let output_file = output.join("sdk.yml");
-    match serde_yaml::to_string(&result.config) {
-        Ok(yaml) => {
-            if let Err(e) = std::fs::write(&output_file, &yaml) {
-                messages::error(&format!("Failed to write {}: {}", output_file.display(), e));
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            messages::error(&format!("Failed to serialize merged config: {}", e));
+    if let Err(e) = std::fs::write(&output_file, &merged_yaml) {
+        messages::error(&format!("Failed to write {}: {}", output_file.display(), e));
+        std::process::exit(1);
+    }
+
+    // Write merged os-dependencies.yml
+    if !os_deps_list.is_empty() {
+        let os_refs: Vec<(&str, &dsdk_cli::config::OsDependencies)> =
+            os_deps_list.iter().map(|(n, d)| (n.as_str(), d)).collect();
+        let merged_os = merge_os_dependencies(&os_refs);
+        let os_yaml = format_os_dependencies_yaml(&merged_os);
+        let os_output = output.join("os-dependencies.yml");
+        if let Err(e) = std::fs::write(&os_output, &os_yaml) {
+            messages::error(&format!("Failed to write {}: {}", os_output.display(), e));
             std::process::exit(1);
         }
+        messages::info(&format!(
+            "  Merged os-dependencies.yml from {} targets",
+            os_deps_list.len()
+        ));
+    }
+
+    // Write merged python-dependencies.yml
+    if !python_deps_list.is_empty() {
+        let py_refs: Vec<(&str, &dsdk_cli::config::PythonDependencies)> = python_deps_list
+            .iter()
+            .map(|(n, d)| (n.as_str(), d))
+            .collect();
+        let merged_py = merge_python_dependencies(&py_refs);
+        let py_yaml = format_python_dependencies_yaml(&merged_py);
+        let py_output = output.join("python-dependencies.yml");
+        if let Err(e) = std::fs::write(&py_output, &py_yaml) {
+            messages::error(&format!("Failed to write {}: {}", py_output.display(), e));
+            std::process::exit(1);
+        }
+        messages::info(&format!(
+            "  Merged python-dependencies.yml from {} targets",
+            python_deps_list.len()
+        ));
     }
 
     messages::success(&format!(

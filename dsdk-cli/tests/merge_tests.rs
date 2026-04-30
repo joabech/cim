@@ -17,9 +17,12 @@
 mod common;
 
 use common::TestFixture;
-use dsdk_cli::config::load_config;
+use dsdk_cli::config::{load_config, load_os_dependencies, load_python_dependencies};
 use dsdk_cli::fragment::apply_fragment;
-use dsdk_cli::merge::merge_targets;
+use dsdk_cli::merge::{
+    format_merged_yaml, format_os_dependencies_yaml, format_python_dependencies_yaml,
+    merge_os_dependencies, merge_python_dependencies, merge_targets,
+};
 
 const TARGET_A_CONFIG: &str = r#"
 mirror: /tmp/mirror
@@ -340,4 +343,149 @@ gits:
         "notes: {:?}",
         result.notes
     );
+}
+
+#[test]
+fn test_merge_format_yaml_roundtrip() {
+    let fixture = TestFixture::new();
+    create_manifests_tree(&fixture);
+
+    let cfg_a = load_config(fixture.path().join("targets/target-a/sdk.yml")).unwrap();
+    let cfg_b = load_config(fixture.path().join("targets/target-b/sdk.yml")).unwrap();
+
+    let result = merge_targets(&[("target-a", &cfg_a), ("target-b", &cfg_b)], None);
+    assert!(result.conflicts.is_empty());
+
+    // Write using formatter, then re-parse
+    let yaml = format_merged_yaml(&result.config, &["target-a", "target-b"]);
+    let output_dir = fixture.create_dir("output");
+    std::fs::write(output_dir.join("sdk.yml"), &yaml).unwrap();
+    let reloaded = load_config(output_dir.join("sdk.yml")).unwrap();
+
+    assert_eq!(reloaded.gits.len(), result.config.gits.len());
+    assert_eq!(
+        reloaded.toolchains.as_ref().map(|t| t.len()),
+        result.config.toolchains.as_ref().map(|t| t.len())
+    );
+    // No nulls in output
+    assert!(!yaml.contains("null"));
+}
+
+#[test]
+fn test_merge_os_dependencies_from_disk() {
+    let fixture = TestFixture::new();
+
+    let os_deps_a = r#"
+linux-x86_64:
+  ubuntu-24.04:
+    command: "apt install"
+    packages:
+      - git
+      - curl
+      - cmake
+"#;
+    let os_deps_b = r#"
+linux-x86_64:
+  ubuntu-24.04:
+    command: "apt install"
+    packages:
+      - git
+      - bison
+      - flex
+macos:
+  macos-any:
+    command: "brew install"
+    packages:
+      - git
+      - cmake
+"#;
+    fixture.write_file("targets/target-a/os-dependencies.yml", os_deps_a);
+    fixture.write_file("targets/target-b/os-dependencies.yml", os_deps_b);
+
+    let deps_a =
+        load_os_dependencies(fixture.path().join("targets/target-a/os-dependencies.yml")).unwrap();
+    let deps_b =
+        load_os_dependencies(fixture.path().join("targets/target-b/os-dependencies.yml")).unwrap();
+
+    let merged = merge_os_dependencies(&[("target-a", &deps_a), ("target-b", &deps_b)]);
+
+    // linux-x86_64 ubuntu-24.04 should have union of packages
+    let pkgs = &merged.os_configs["linux-x86_64"].distros["ubuntu-24.04"]
+        .package_manager
+        .packages;
+    assert!(pkgs.contains(&"git".to_string()));
+    assert!(pkgs.contains(&"curl".to_string()));
+    assert!(pkgs.contains(&"bison".to_string()));
+    assert!(pkgs.contains(&"cmake".to_string()));
+    assert!(pkgs.contains(&"flex".to_string()));
+    // Should be sorted and deduplicated
+    assert_eq!(pkgs.len(), 5);
+
+    // macos should be present from target-b only
+    assert!(merged.os_configs.contains_key("macos"));
+
+    // Verify YAML output is parseable
+    let yaml = format_os_dependencies_yaml(&merged);
+    assert!(yaml.contains("linux-x86_64:"));
+    assert!(yaml.contains("macos:"));
+}
+
+#[test]
+fn test_merge_python_dependencies_from_disk() {
+    let fixture = TestFixture::new();
+
+    let py_deps_a = r#"
+profiles:
+  docs:
+    packages:
+      - sphinx
+      - myst-parser
+default: docs
+"#;
+    let py_deps_b = r#"
+profiles:
+  docs:
+    packages:
+      - sphinx
+      - sphinx-rtd-theme
+  dev:
+    packages:
+      - pytest
+      - black
+default: docs
+"#;
+    fixture.write_file("targets/target-a/python-dependencies.yml", py_deps_a);
+    fixture.write_file("targets/target-b/python-dependencies.yml", py_deps_b);
+
+    let deps_a = load_python_dependencies(
+        fixture
+            .path()
+            .join("targets/target-a/python-dependencies.yml"),
+    )
+    .unwrap();
+    let deps_b = load_python_dependencies(
+        fixture
+            .path()
+            .join("targets/target-b/python-dependencies.yml"),
+    )
+    .unwrap();
+
+    let merged = merge_python_dependencies(&[("target-a", &deps_a), ("target-b", &deps_b)]);
+
+    // docs profile should have union
+    let docs = &merged.profiles["docs"].packages;
+    assert!(docs.contains(&"sphinx".to_string()));
+    assert!(docs.contains(&"myst-parser".to_string()));
+    assert!(docs.contains(&"sphinx-rtd-theme".to_string()));
+
+    // dev profile from target-b
+    assert!(merged.profiles.contains_key("dev"));
+    assert!(merged.profiles["dev"]
+        .packages
+        .contains(&"pytest".to_string()));
+
+    // Verify YAML output
+    let yaml = format_python_dependencies_yaml(&merged);
+    assert!(yaml.contains("profiles:"));
+    assert!(yaml.contains("default: docs"));
 }
