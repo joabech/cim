@@ -11,449 +11,214 @@
 
 use anyhow::Result;
 use ratatui::prelude::*;
-
 use ratatui::widgets::{Paragraph, ScrollbarState, Wrap};
+use std::path::Path;
 use tokio::sync::mpsc;
 
-use crate::cim;
+use crate::cim::{self, CimCommand};
+use crate::components::command_list::CommandList;
 use crate::events::handle_event;
+use crate::panels::build::{ForeachPanel, MakefilePanel};
+use crate::panels::config::ConfigPanel;
+use crate::panels::docs::{DocsBuildPanel, DocsCreatePanel, DocsServePanel};
+use crate::panels::install::{OsDepsPanel, PipPanel, ToolchainsPanel, ToolsPanel};
+use crate::panels::release::ReleasePanel;
+use crate::panels::utils::{
+    HashCopyFilesPanel, HashToolchainsPanel, SyncCopyFilesPanel, UtilsUpdatePanel,
+};
+use crate::panels::workspace::{AddPanel, InitPanel, UpdatePanel};
+use crate::panels::{CommandPanel, PanelAction};
 use crate::ui::draw;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
-    SourceInput,
-    #[allow(dead_code)]
-    TargetList,
+    CommandList,
+    Options,
     Output,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PopupFocus {
-    VersionDropdown,
-    WorkspaceInput,
-    MatchInput,
-    NoMirror,
-    Force,
-    Verbose,
-    Install,
-    Full,
-    NoSudo,
-    Symlink,
-    Yes,
-    CertValidation,
-    CancelButton,
-    CreateButton,
-}
-
-pub struct InitPopupState {
-    pub source: String,
-    pub targets: Vec<String>,
-    pub selected_target: usize,
-    pub versions: Vec<String>,
-    pub selected_version: usize,
-    pub version_dropdown_open: bool,
-
-    pub workspace_input: String,
-    pub match_input: String,
-
-    pub no_mirror: bool,
-    pub force: bool,
-    pub verbose: bool,
-    pub install: bool,
-    pub full: bool,
-    pub no_sudo: bool,
-    pub symlink: bool,
-    pub yes: bool,
-
-    pub selected_cert: usize,
-    pub cert_dropdown_open: bool,
-
-    pub focus: PopupFocus,
-    pub is_loading_versions: bool,
-}
-
-impl InitPopupState {
-    pub fn new(source: String, targets: Vec<String>, selected_target: usize) -> Self {
-        Self {
-            source,
-            targets,
-            selected_target,
-            versions: Vec::new(),
-            selected_version: 0,
-            version_dropdown_open: false,
-            workspace_input: String::new(),
-            match_input: String::new(),
-            no_mirror: false,
-            force: false,
-            verbose: false,
-            install: true,
-            full: false,
-            no_sudo: false,
-            symlink: false,
-            yes: false,
-            selected_cert: 0,
-            cert_dropdown_open: false,
-            focus: PopupFocus::VersionDropdown,
-            is_loading_versions: true,
-        }
-    }
-
-    pub fn next_focus(&mut self) {
-        self.focus = match self.focus {
-            PopupFocus::VersionDropdown => PopupFocus::WorkspaceInput,
-            PopupFocus::WorkspaceInput => PopupFocus::MatchInput,
-            PopupFocus::MatchInput => PopupFocus::NoMirror,
-            PopupFocus::NoMirror => PopupFocus::Force,
-            PopupFocus::Force => PopupFocus::Verbose,
-            PopupFocus::Verbose => PopupFocus::Install,
-            PopupFocus::Install => PopupFocus::Full,
-            PopupFocus::Full => PopupFocus::NoSudo,
-            PopupFocus::NoSudo => PopupFocus::Symlink,
-            PopupFocus::Symlink => PopupFocus::Yes,
-            PopupFocus::Yes => PopupFocus::CertValidation,
-            PopupFocus::CertValidation => PopupFocus::CancelButton,
-            PopupFocus::CancelButton => PopupFocus::CreateButton,
-            PopupFocus::CreateButton => PopupFocus::VersionDropdown,
-        };
-    }
-
-    pub fn previous_focus(&mut self) {
-        self.focus = match self.focus {
-            PopupFocus::VersionDropdown => PopupFocus::CreateButton,
-            PopupFocus::WorkspaceInput => PopupFocus::VersionDropdown,
-            PopupFocus::MatchInput => PopupFocus::WorkspaceInput,
-            PopupFocus::NoMirror => PopupFocus::MatchInput,
-            PopupFocus::Force => PopupFocus::NoMirror,
-            PopupFocus::Verbose => PopupFocus::Force,
-            PopupFocus::Install => PopupFocus::Verbose,
-            PopupFocus::Full => PopupFocus::Install,
-            PopupFocus::NoSudo => PopupFocus::Full,
-            PopupFocus::Symlink => PopupFocus::NoSudo,
-            PopupFocus::Yes => PopupFocus::Symlink,
-            PopupFocus::CertValidation => PopupFocus::Yes,
-            PopupFocus::CancelButton => PopupFocus::CertValidation,
-            PopupFocus::CreateButton => PopupFocus::CancelButton,
-        };
-    }
-
-    pub fn get_selected_version(&self) -> Option<String> {
-        if self.selected_version == 0 || self.versions.is_empty() {
-            None
-        } else {
-            Some(self.versions[self.selected_version - 1].clone())
-        }
-    }
-
-    pub fn get_cert_validation(&self) -> &'static str {
-        match self.selected_cert {
-            0 => "strict",
-            1 => "relaxed",
-            2 => "auto",
-            _ => "strict",
-        }
-    }
-}
-
 pub struct App {
-    pub source_input: String,
-    pub targets: Vec<String>,
-    pub selected_target: usize,
-    pub target_scroll_offset: usize, // For scrolling target list
     pub focus: Focus,
-    pub is_loading: bool,
-    pub error_message: Option<String>,
-    pub init_popup: Option<InitPopupState>,
-    pub status_message: Option<String>,
+    pub in_workspace: bool,
+    pub command_list: CommandList,
+    pub panels: Vec<Box<dyn CommandPanel>>,
     pub output_text: String,
-    pub output_scroll: u16,      // Vertical scroll offset for output pane
-    pub output_pane_height: u16, // Height of the output pane (for auto-scroll logic)
-    pub output_pane_width: u16,  // Content width for rendered-row calculation
+    pub output_scroll: u16,
+    pub output_pane_height: u16,
+    pub output_pane_width: u16,
     pub output_scrollbar_state: ScrollbarState,
-
-    // Async channels
-    target_rx: Option<mpsc::Receiver<Result<Vec<String>>>>,
-    version_rx: Option<mpsc::Receiver<Result<Vec<String>>>>,
+    pub output_maximized: bool,
+    pub status_message: Option<String>,
     output_rx: Option<mpsc::Receiver<String>>,
+}
+
+fn find_workspace() -> bool {
+    let mut dir = std::env::current_dir().ok();
+    while let Some(d) = dir {
+        if d.join(".workspace").is_file() {
+            return true;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
+    false
 }
 
 impl App {
     pub fn new() -> Self {
-        // Use the remote manifest repo that has versions
-        let default_source = "https://github.com/joabech/cim-manifests.git".to_string();
+        let in_workspace = find_workspace();
 
-        let mut app = Self {
-            source_input: default_source,
-            targets: Vec::new(),
-            selected_target: 0,
-            target_scroll_offset: 0,
-            focus: Focus::TargetList,
-            is_loading: false,
-            error_message: None,
-            init_popup: None,
-            status_message: None,
-            target_rx: None,
-            version_rx: None,
-            output_rx: None,
+        let panels: Vec<Box<dyn CommandPanel>> = vec![
+            // WORKSPACE (indices 0-2)
+            Box::new(InitPanel::new()),
+            Box::new(UpdatePanel::new()),
+            Box::new(AddPanel::new()),
+            // BUILD (indices 3-4)
+            Box::new(ForeachPanel::new()),
+            Box::new(MakefilePanel::new()),
+            // INSTALL (indices 5-8)
+            Box::new(OsDepsPanel::new()),
+            Box::new(PipPanel::new()),
+            Box::new(ToolchainsPanel::new()),
+            Box::new(ToolsPanel::new()),
+            // DOCS (indices 9-11)
+            Box::new(DocsCreatePanel::new()),
+            Box::new(DocsBuildPanel::new()),
+            Box::new(DocsServePanel::new()),
+            // RELEASE (index 12)
+            Box::new(ReleasePanel::new()),
+            // CONFIG (index 13)
+            Box::new(ConfigPanel::new()),
+            // UTILS (indices 14-17)
+            Box::new(HashCopyFilesPanel::new()),
+            Box::new(HashToolchainsPanel::new()),
+            Box::new(SyncCopyFilesPanel::new()),
+            Box::new(UtilsUpdatePanel),
+        ];
+
+        Self {
+            focus: Focus::CommandList,
+            in_workspace,
+            command_list: CommandList::new(),
+            panels,
             output_text: String::new(),
             output_scroll: 0,
-            output_pane_height: 10, // Default, will be updated on first draw
-            output_pane_width: 76,  // Default, will be updated on first draw
+            output_pane_height: 10,
+            output_pane_width: 76,
             output_scrollbar_state: ScrollbarState::default(),
-        };
-        app.refresh_targets();
-        app
+            output_maximized: false,
+            status_message: None,
+            output_rx: None,
+        }
     }
 
     pub async fn run(&mut self, terminal: &mut Terminal<impl Backend>) -> Result<()> {
         loop {
-            // Draw UI
             terminal.draw(|f| draw(f, self))?;
 
-            // Handle events
             if handle_event(self)? {
                 return Ok(());
             }
 
-            // Check async results
-            self.check_async_results().await;
+            if let Some(idx) = self.command_list.selected_panel_index() {
+                self.panels[idx].check_async();
+            }
 
-            // Check for command output
             self.check_output();
         }
     }
 
-    fn spawn_fetch_targets(&mut self, tx: mpsc::Sender<Result<Vec<String>>>) {
-        if self.is_loading {
-            return;
-        }
-
-        self.is_loading = true;
-        self.error_message = None;
-        let source = self.source_input.clone();
-
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || cim::fetch_targets(&source)).await;
-            let _ = tx
-                .send(result.unwrap_or_else(|e| Err(anyhow::anyhow!("Task panicked: {}", e))))
-                .await;
-        });
+    pub fn active_panel(&self) -> Option<&dyn CommandPanel> {
+        self.command_list
+            .selected_panel_index()
+            .map(|idx| self.panels[idx].as_ref())
     }
 
-    pub fn refresh_targets(&mut self) {
-        let (tx, rx) = mpsc::channel(10);
-        self.target_rx = Some(rx);
-        self.spawn_fetch_targets(tx);
-    }
-
-    async fn check_async_results(&mut self) {
-        // Check target fetch results
-        if let Some(rx) = &mut self.target_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.is_loading = false;
-                self.target_rx = None;
-
-                match result {
-                    Ok(targets) => {
-                        self.targets = targets;
-                        if self.selected_target >= self.targets.len() && !self.targets.is_empty() {
-                            self.selected_target = 0;
-                        }
-                        self.status_message =
-                            Some(format!("Loaded {} targets", self.targets.len()));
-                    }
-                    Err(e) => {
-                        self.error_message = Some(e.to_string());
-                        self.status_message = Some(format!("Error: {}", e));
-                    }
-                }
+    pub fn handle_panel_action(&mut self, action: PanelAction) {
+        match action {
+            PanelAction::None => {}
+            PanelAction::Back => {
+                self.focus = Focus::CommandList;
             }
-        }
-
-        // Check version fetch results for popup
-        if let Some(rx) = &mut self.version_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.version_rx = None;
-                if let Some(popup) = &mut self.init_popup {
-                    popup.is_loading_versions = false;
-                    match result {
-                        Ok(versions) => {
-                            popup.versions = versions;
-                        }
-                        Err(e) => {
-                            popup.versions = Vec::new();
-                            self.status_message = Some(format!("Failed to fetch versions: {}", e));
-                        }
-                    }
-                }
+            PanelAction::Run(cmd) => {
+                self.execute_command(cmd);
             }
         }
     }
 
-    pub fn select_next(&mut self) {
-        if !self.targets.is_empty() && self.selected_target + 1 < self.targets.len() {
-            self.selected_target += 1;
-            // Adjust scroll offset if selection goes below visible area
-            let visible_count = 10.min(self.targets.len());
-            if self.selected_target >= self.target_scroll_offset + visible_count {
-                self.target_scroll_offset = self.selected_target.saturating_sub(visible_count - 1);
-            }
-        }
-    }
+    pub fn execute_command(&mut self, cmd: CimCommand) {
+        let label = cmd.label().to_string();
 
-    pub fn select_previous(&mut self) {
-        self.selected_target = self.selected_target.saturating_sub(1);
-        // Adjust scroll offset if selection goes above visible area
-        if self.selected_target < self.target_scroll_offset {
-            self.target_scroll_offset = self.selected_target;
-        }
-    }
+        match cim::spawn_command(&cmd) {
+            Ok(mut child) => {
+                self.status_message = Some(format!("Running 'cim {}'...", label));
 
-    pub fn open_init_popup(&mut self) {
-        if self.targets.is_empty() {
-            return;
-        }
+                self.output_text.clear();
+                self.output_text
+                    .push_str(&format!("=== cim {} ===\n\n", label));
 
-        let popup = InitPopupState::new(
-            self.source_input.clone(),
-            self.targets.clone(),
-            self.selected_target,
-        );
+                let (tx, rx) = mpsc::channel::<String>(100);
+                self.output_rx = Some(rx);
 
-        // Fetch versions for the selected target
-        let target = self.targets[self.selected_target].clone();
-        let source = self.source_input.clone();
-        let (tx, rx) = mpsc::channel(10);
-        self.version_rx = Some(rx);
-
-        tokio::spawn(async move {
-            let result =
-                tokio::task::spawn_blocking(move || cim::fetch_versions(&source, &target)).await;
-            let _ = tx
-                .send(result.unwrap_or_else(|e| Err(anyhow::anyhow!("Task panicked: {}", e))))
-                .await;
-        });
-
-        self.init_popup = Some(popup);
-    }
-
-    pub fn close_init_popup(&mut self) {
-        self.init_popup = None;
-        self.version_rx = None;
-    }
-
-    pub fn execute_init(&mut self) {
-        if let Some(popup) = &self.init_popup {
-            let target = popup.targets[popup.selected_target].clone();
-            let source = popup.source.clone();
-            let version = popup.get_selected_version();
-            let workspace = if popup.workspace_input.is_empty() {
-                None
-            } else {
-                Some(popup.workspace_input.clone())
-            };
-            let match_pattern = if popup.match_input.is_empty() {
-                None
-            } else {
-                Some(popup.match_input.clone())
-            };
-
-            match cim::run_init(
-                &target,
-                &source,
-                version.as_deref(),
-                workspace.as_deref(),
-                popup.no_mirror,
-                popup.force,
-                match_pattern.as_deref(),
-                popup.verbose,
-                popup.install,
-                popup.full,
-                popup.no_sudo,
-                popup.symlink,
-                popup.yes,
-                Some(popup.get_cert_validation()),
-            ) {
-                Ok(mut child) => {
-                    self.status_message =
-                        Some(format!("Initializing workspace for '{}'...", target));
-                    self.close_init_popup();
-
-                    // Clear previous output
-                    self.output_text.clear();
-                    self.output_text.push_str(&format!(
-                        "=== Initializing workspace for '{}' ===\n\n",
-                        target
-                    ));
-
-                    // Create channel for output lines
-                    let (tx, rx) = mpsc::channel::<String>(100);
-                    self.output_rx = Some(rx);
-
-                    // Spawn stdout reader
-                    if let Some(stdout) = child.stdout.take() {
-                        let tx_stdout = tx.clone();
-                        tokio::spawn(async move {
-                            use tokio::io::{AsyncBufReadExt, BufReader};
-                            let reader = BufReader::new(stdout);
-                            let mut lines = reader.lines();
-                            while let Ok(Some(line)) = lines.next_line().await {
-                                let _ = tx_stdout.send(line).await;
-                            }
-                        });
-                    }
-
-                    // Spawn stderr reader
-                    if let Some(stderr) = child.stderr.take() {
-                        let tx_stderr = tx.clone();
-                        tokio::spawn(async move {
-                            use tokio::io::{AsyncBufReadExt, BufReader};
-                            let reader = BufReader::new(stderr);
-                            let mut lines = reader.lines();
-                            while let Ok(Some(line)) = lines.next_line().await {
-                                let _ = tx_stderr.send(format!("ERROR: {}", line)).await;
-                            }
-                        });
-                    }
-
-                    // Spawn completion monitor
+                if let Some(stdout) = child.stdout.take() {
+                    let tx_stdout = tx.clone();
                     tokio::spawn(async move {
-                        match child.wait().await {
-                            Ok(status) => {
-                                let msg = if status.success() {
-                                    "\n=== Workspace initialized successfully ===".to_string()
-                                } else {
-                                    format!(
-                                        "\n=== Initialization failed with exit code: {:?} ===",
-                                        status.code()
-                                    )
-                                };
-                                let _ = tx.send(msg).await;
-                            }
-                            Err(e) => {
-                                let _ = tx
-                                    .send(format!("\n=== Failed to wait for process: {} ===", e))
-                                    .await;
-                            }
+                        use tokio::io::{AsyncBufReadExt, BufReader};
+                        let reader = BufReader::new(stdout);
+                        let mut lines = reader.lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let _ = tx_stdout.send(line).await;
                         }
                     });
                 }
-                Err(e) => {
-                    self.status_message = Some(format!("Failed to start init: {}", e));
+
+                if let Some(stderr) = child.stderr.take() {
+                    let tx_stderr = tx.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncBufReadExt, BufReader};
+                        let reader = BufReader::new(stderr);
+                        let mut lines = reader.lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let _ = tx_stderr.send(format!("ERROR: {}", line)).await;
+                        }
+                    });
                 }
+
+                tokio::spawn(async move {
+                    match child.wait().await {
+                        Ok(status) => {
+                            let msg = if status.success() {
+                                format!("\n=== {} completed successfully ===", label)
+                            } else {
+                                format!(
+                                    "\n=== {} failed with exit code: {:?} ===",
+                                    label,
+                                    status.code()
+                                )
+                            };
+                            let _ = tx.send(msg).await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(format!("\n=== Failed to wait for process: {} ===", e))
+                                .await;
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to start: {}", e));
             }
         }
     }
 
     fn check_output(&mut self) {
         if let Some(rx) = &mut self.output_rx {
-            // Drain all available lines
             let mut new_content = false;
             while let Ok(line) = rx.try_recv() {
                 self.output_text.push_str(&line);
                 self.output_text.push('\n');
                 new_content = true;
             }
-            // Auto-scroll to show latest content (bash-like behavior)
             if new_content {
                 let total_rendered = self.rendered_row_count();
                 let visible = self.output_pane_height.saturating_sub(2);
@@ -463,7 +228,6 @@ impl App {
         }
     }
 
-    // Output scrolling methods
     pub fn scroll_output_up(&mut self, lines: u16) {
         self.output_scroll = self.output_scroll.saturating_sub(lines);
         self.sync_scrollbar();
@@ -489,8 +253,6 @@ impl App {
         self.sync_scrollbar();
     }
 
-    /// Compute total rendered rows using ratatui's own Paragraph::line_count so
-    /// the result is always consistent with what the widget actually renders.
     fn rendered_row_count(&self) -> u16 {
         let text = Text::from(self.output_text.as_str());
         Paragraph::new(text)
@@ -498,8 +260,7 @@ impl App {
             .line_count(self.output_pane_width) as u16
     }
 
-    /// Keep ScrollbarState in sync after any scroll or content change.
-    fn sync_scrollbar(&mut self) {
+    pub fn sync_scrollbar(&mut self) {
         let total = self.rendered_row_count() as usize;
         self.output_scrollbar_state =
             ScrollbarState::new(total).position(self.output_scroll as usize);

@@ -21,6 +21,7 @@ mod app;
 mod cim;
 mod components;
 mod events;
+mod panels;
 mod theme;
 mod ui;
 

@@ -9,13 +9,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::time::Duration;
 
-use crate::app::{App, Focus, PopupFocus};
+use crate::app::{App, Focus};
 
-/// Handle events and return true if should quit
-pub fn handle_event(app: &mut App) -> anyhow::Result<bool> {
+pub fn handle_event(app: &mut App) -> Result<bool> {
     if event::poll(Duration::from_millis(50))? {
         if let Event::Key(key) = event::read()? {
             return handle_key_event(app, key);
@@ -24,346 +24,88 @@ pub fn handle_event(app: &mut App) -> anyhow::Result<bool> {
     Ok(false)
 }
 
-fn handle_key_event(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
-    // Handle popup events first if popup is open
-    if app.init_popup.is_some() {
-        return handle_popup_event(app, key);
+fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+        app.output_text.clear();
+        app.output_scroll = 0;
+        app.sync_scrollbar();
+        app.status_message = None;
+        return Ok(false);
     }
 
+    if key.code == KeyCode::Char('F') {
+        app.output_maximized = !app.output_maximized;
+        if app.output_maximized {
+            app.focus = Focus::Output;
+        }
+        return Ok(false);
+    }
+
+    match app.focus {
+        Focus::CommandList => handle_command_list_keys(app, key),
+        Focus::Options => handle_options_keys(app, key),
+        Focus::Output => handle_output_keys(app, key),
+    }
+}
+
+fn handle_command_list_keys(app: &mut App, key: KeyEvent) -> Result<bool> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(true),
-        KeyCode::Char('r') | KeyCode::Char('R') => {
-            app.refresh_targets();
-        }
-        KeyCode::Tab => {
-            app.focus = match app.focus {
-                Focus::SourceInput => Focus::TargetList,
-                Focus::TargetList => Focus::Output,
-                Focus::Output => Focus::SourceInput,
-            };
-        }
-        KeyCode::Enter => {
-            if app.focus == Focus::TargetList && !app.targets.is_empty() {
-                app.open_init_popup();
+        KeyCode::Char('j') | KeyCode::Down => app.command_list.select_next(),
+        KeyCode::Char('k') | KeyCode::Up => app.command_list.select_previous(),
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            if app.command_list.is_selected_disabled(app.in_workspace) {
+                app.status_message = Some("Not in a workspace. Run 'cim init' first.".to_string());
+            } else {
+                app.focus = Focus::Options;
+                app.status_message = None;
             }
         }
-        KeyCode::Up => match app.focus {
-            Focus::TargetList => app.select_previous(),
-            Focus::Output => app.scroll_output_up(1),
-            _ => {}
-        },
-        KeyCode::Down => match app.focus {
-            Focus::TargetList => app.select_next(),
-            Focus::Output => app.scroll_output_down(1),
-            _ => {}
-        },
-        KeyCode::PageUp => {
-            if app.focus == Focus::Output {
-                app.scroll_output_up(10);
-            }
-        }
-        KeyCode::PageDown => {
-            if app.focus == Focus::Output {
-                app.scroll_output_down(10);
-            }
-        }
-        KeyCode::Home => {
-            if app.focus == Focus::Output {
-                app.scroll_output_top();
-            }
-        }
-        KeyCode::End => {
-            if app.focus == Focus::Output {
-                app.scroll_output_bottom();
-            }
-        }
-        KeyCode::Char(c) => {
-            if app.focus == Focus::SourceInput {
-                app.source_input.push(c);
-                app.targets.clear();
-                app.selected_target = 0;
-            }
-        }
-        KeyCode::Backspace => {
-            if app.focus == Focus::SourceInput {
-                app.source_input.pop();
-                app.targets.clear();
-                app.selected_target = 0;
-            }
-        }
-        KeyCode::Delete => {
-            if app.focus == Focus::SourceInput {
-                // Delete at cursor position would need cursor tracking
-            }
-        }
-        KeyCode::Left => {
-            // Move cursor left
-        }
-        KeyCode::Right => {
-            // Move cursor right
+        KeyCode::Char('`') => {
+            app.focus = Focus::Output;
         }
         _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_options_keys(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+            app.focus = Focus::CommandList;
+            return Ok(false);
+        }
+        KeyCode::Char('`') => {
+            app.focus = Focus::Output;
+            return Ok(false);
+        }
+        _ => {}
+    }
+
+    if let Some(idx) = app.command_list.selected_panel_index() {
+        let action = app.panels[idx].handle_key(key);
+        app.handle_panel_action(action);
     }
 
     Ok(false)
 }
 
-fn handle_popup_event(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
-    let popup = app.init_popup.as_mut().unwrap();
-
+fn handle_output_keys(app: &mut App, key: KeyEvent) -> Result<bool> {
     match key.code {
-        KeyCode::Esc => {
-            app.close_init_popup();
-            return Ok(false);
-        }
-        KeyCode::Char('c') => {
-            // 'c' to Create (but not in text input fields)
-            match popup.focus {
-                PopupFocus::WorkspaceInput => popup.workspace_input.push('c'),
-                PopupFocus::MatchInput => popup.match_input.push('c'),
-                _ => app.execute_init(),
+        KeyCode::Esc | KeyCode::Char('`') => {
+            if app.output_maximized {
+                app.output_maximized = false;
+            } else {
+                app.focus = Focus::CommandList;
             }
         }
-        KeyCode::Char('C') => {
-            // 'C' to Create (but not in text input fields)
-            match popup.focus {
-                PopupFocus::WorkspaceInput => popup.workspace_input.push('C'),
-                PopupFocus::MatchInput => popup.match_input.push('C'),
-                _ => app.execute_init(),
-            }
-        }
-        // Keyboard shortcuts for checkboxes (toggle and focus)
-        KeyCode::Char('n') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('n'),
-            PopupFocus::MatchInput => popup.match_input.push('n'),
-            _ => {
-                popup.no_mirror = !popup.no_mirror;
-                popup.focus = PopupFocus::NoMirror;
-            }
-        },
-        KeyCode::Char('N') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('N'),
-            PopupFocus::MatchInput => popup.match_input.push('N'),
-            _ => {
-                popup.no_mirror = !popup.no_mirror;
-                popup.focus = PopupFocus::NoMirror;
-            }
-        },
-        KeyCode::Char('f') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('f'),
-            PopupFocus::MatchInput => popup.match_input.push('f'),
-            _ => {
-                popup.force = !popup.force;
-                popup.focus = PopupFocus::Force;
-            }
-        },
-        KeyCode::Char('F') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('F'),
-            PopupFocus::MatchInput => popup.match_input.push('F'),
-            _ => {
-                popup.force = !popup.force;
-                popup.focus = PopupFocus::Force;
-            }
-        },
-        KeyCode::Char('b') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('b'),
-            PopupFocus::MatchInput => popup.match_input.push('b'),
-            _ => {
-                popup.verbose = !popup.verbose;
-                popup.focus = PopupFocus::Verbose;
-            }
-        },
-        KeyCode::Char('B') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('B'),
-            PopupFocus::MatchInput => popup.match_input.push('B'),
-            _ => {
-                popup.verbose = !popup.verbose;
-                popup.focus = PopupFocus::Verbose;
-            }
-        },
-        KeyCode::Char('i') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('i'),
-            PopupFocus::MatchInput => popup.match_input.push('i'),
-            _ => {
-                popup.install = !popup.install;
-                popup.focus = PopupFocus::Install;
-            }
-        },
-        KeyCode::Char('I') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('I'),
-            PopupFocus::MatchInput => popup.match_input.push('I'),
-            _ => {
-                popup.install = !popup.install;
-                popup.focus = PopupFocus::Install;
-            }
-        },
-        KeyCode::Char('u') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('u'),
-            PopupFocus::MatchInput => popup.match_input.push('u'),
-            _ => {
-                popup.full = !popup.full;
-                popup.focus = PopupFocus::Full;
-            }
-        },
-        KeyCode::Char('U') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('U'),
-            PopupFocus::MatchInput => popup.match_input.push('U'),
-            _ => {
-                popup.full = !popup.full;
-                popup.focus = PopupFocus::Full;
-            }
-        },
-        KeyCode::Char('s') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('s'),
-            PopupFocus::MatchInput => popup.match_input.push('s'),
-            _ => {
-                popup.no_sudo = !popup.no_sudo;
-                popup.focus = PopupFocus::NoSudo;
-            }
-        },
-        KeyCode::Char('S') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('S'),
-            PopupFocus::MatchInput => popup.match_input.push('S'),
-            _ => {
-                popup.no_sudo = !popup.no_sudo;
-                popup.focus = PopupFocus::NoSudo;
-            }
-        },
-        KeyCode::Char('l') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('l'),
-            PopupFocus::MatchInput => popup.match_input.push('l'),
-            _ => {
-                popup.symlink = !popup.symlink;
-                popup.focus = PopupFocus::Symlink;
-            }
-        },
-        KeyCode::Char('L') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('L'),
-            PopupFocus::MatchInput => popup.match_input.push('L'),
-            _ => {
-                popup.symlink = !popup.symlink;
-                popup.focus = PopupFocus::Symlink;
-            }
-        },
-        KeyCode::Char('y') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('y'),
-            PopupFocus::MatchInput => popup.match_input.push('y'),
-            _ => {
-                popup.yes = !popup.yes;
-                popup.focus = PopupFocus::Yes;
-            }
-        },
-        KeyCode::Char('Y') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('Y'),
-            PopupFocus::MatchInput => popup.match_input.push('Y'),
-            _ => {
-                popup.yes = !popup.yes;
-                popup.focus = PopupFocus::Yes;
-            }
-        },
-        // Keyboard shortcuts for dropdowns (focus)
-        KeyCode::Char('v') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('v'),
-            PopupFocus::MatchInput => popup.match_input.push('v'),
-            _ => {
-                popup.version_dropdown_open = false;
-                popup.cert_dropdown_open = false;
-                popup.focus = PopupFocus::VersionDropdown;
-            }
-        },
-        KeyCode::Char('V') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('V'),
-            PopupFocus::MatchInput => popup.match_input.push('V'),
-            _ => {
-                popup.version_dropdown_open = false;
-                popup.cert_dropdown_open = false;
-                popup.focus = PopupFocus::VersionDropdown;
-            }
-        },
-        KeyCode::Char('a') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('a'),
-            PopupFocus::MatchInput => popup.match_input.push('a'),
-            _ => {
-                popup.version_dropdown_open = false;
-                popup.cert_dropdown_open = false;
-                popup.focus = PopupFocus::CertValidation;
-            }
-        },
-        KeyCode::Char('A') => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push('A'),
-            PopupFocus::MatchInput => popup.match_input.push('A'),
-            _ => {
-                popup.version_dropdown_open = false;
-                popup.cert_dropdown_open = false;
-                popup.focus = PopupFocus::CertValidation;
-            }
-        },
-        KeyCode::Tab => {
-            popup.next_focus();
-        }
-        KeyCode::BackTab => {
-            popup.previous_focus();
-        }
-        KeyCode::Enter => {
-            if popup.focus == PopupFocus::CancelButton {
-                app.close_init_popup();
-            } else if popup.focus == PopupFocus::CreateButton {
-                app.execute_init();
-            } else if popup.focus == PopupFocus::VersionDropdown && !popup.versions.is_empty() {
-                popup.version_dropdown_open = !popup.version_dropdown_open;
-            } else if popup.focus == PopupFocus::CertValidation {
-                popup.cert_dropdown_open = !popup.cert_dropdown_open;
-            }
-        }
-        KeyCode::Up => match popup.focus {
-            PopupFocus::VersionDropdown if popup.version_dropdown_open => {
-                popup.selected_version = popup.selected_version.saturating_sub(1);
-            }
-            PopupFocus::CertValidation if popup.cert_dropdown_open => {
-                popup.selected_cert = popup.selected_cert.saturating_sub(1);
-            }
-            _ => {}
-        },
-        KeyCode::Down => match popup.focus {
-            PopupFocus::VersionDropdown if popup.version_dropdown_open => {
-                if popup.selected_version + 1 < popup.versions.len() + 1 {
-                    popup.selected_version += 1;
-                }
-            }
-            PopupFocus::CertValidation if popup.cert_dropdown_open => {
-                if popup.selected_cert + 1 < 3 {
-                    popup.selected_cert += 1;
-                }
-            }
-            _ => {}
-        },
-        KeyCode::Char(' ') => match popup.focus {
-            PopupFocus::NoMirror => popup.no_mirror = !popup.no_mirror,
-            PopupFocus::Force => popup.force = !popup.force,
-            PopupFocus::Verbose => popup.verbose = !popup.verbose,
-            PopupFocus::Install => popup.install = !popup.install,
-            PopupFocus::Full => popup.full = !popup.full,
-            PopupFocus::NoSudo => popup.no_sudo = !popup.no_sudo,
-            PopupFocus::Symlink => popup.symlink = !popup.symlink,
-            PopupFocus::Yes => popup.yes = !popup.yes,
-            _ => {}
-        },
-        KeyCode::Char(c) => match popup.focus {
-            PopupFocus::WorkspaceInput => popup.workspace_input.push(c),
-            PopupFocus::MatchInput => popup.match_input.push(c),
-            _ => {}
-        },
-        KeyCode::Backspace => match popup.focus {
-            PopupFocus::WorkspaceInput => {
-                popup.workspace_input.pop();
-            }
-            PopupFocus::MatchInput => {
-                popup.match_input.pop();
-            }
-            _ => {}
-        },
+        KeyCode::Char('j') | KeyCode::Down => app.scroll_output_down(1),
+        KeyCode::Char('k') | KeyCode::Up => app.scroll_output_up(1),
+        KeyCode::PageDown => app.scroll_output_down(10),
+        KeyCode::PageUp => app.scroll_output_up(10),
+        KeyCode::Home | KeyCode::Char('g') => app.scroll_output_top(),
+        KeyCode::End | KeyCode::Char('G') => app.scroll_output_bottom(),
         _ => {}
     }
-
     Ok(false)
 }

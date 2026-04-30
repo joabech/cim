@@ -98,6 +98,11 @@ impl Theme {
         Style::default().fg(self.palette.muted)
     }
 
+    /// Disabled/greyed-out style
+    pub fn disabled(&self) -> Style {
+        Style::default().fg(self.palette.unfocus_border)
+    }
+
     /// Success style
     pub fn success(&self) -> Style {
         Style::default().fg(self.palette.success)
@@ -171,18 +176,6 @@ impl Theme {
         }
     }
 
-    /// Cancel button style (red/error)
-    pub fn cancel_button(&self, focused: bool) -> Style {
-        if focused {
-            Style::default()
-                .bg(self.palette.error)
-                .fg(self.palette.bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(self.palette.muted)
-        }
-    }
-
     /// Checkbox style
     pub fn checkbox(&self, checked: bool, focused: bool) -> Style {
         if focused {
@@ -224,42 +217,6 @@ impl Theme {
             Style::default().fg(self.palette.fg)
         }
     }
-
-    /// Dropdown item style
-    pub fn dropdown_item(&self, selected: bool) -> Style {
-        if selected {
-            Style::default()
-                .bg(self.palette.primary)
-                .fg(self.palette.bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(self.palette.fg)
-        }
-    }
-
-    /// Loading/spinner style
-    pub fn loading(&self) -> Style {
-        Style::default()
-            .fg(self.palette.primary)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// Popup overlay background style
-    pub fn popup_overlay(&self) -> Style {
-        Style::default().bg(self.palette.bg)
-    }
-
-    /// Popup block style
-    pub fn popup_block(&self) -> Style {
-        Style::default()
-            .fg(self.palette.primary)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// Help text style
-    pub fn help_text(&self) -> Style {
-        Style::default().fg(self.palette.muted)
-    }
 }
 
 /// Global theme instance - can be accessed from anywhere
@@ -277,72 +234,15 @@ pub fn theme() -> &'static Theme {
     THEME.get().expect("Theme not initialized")
 }
 
-/// Symbols used throughout the UI
 pub mod symbols {
-    /// Checkbox checked
     pub const CHECKBOX_CHECKED: &str = "✓";
-    /// Checkbox unchecked
     pub const CHECKBOX_UNCHECKED: &str = " ";
-    /// Selection indicator
     pub const SELECTION: &str = "▸";
-    // Dropdown open indicator (reserved for future use)
-    // pub const DROPDOWN_OPEN: &str = "▴";
-    /// Dropdown closed indicator
     pub const DROPDOWN_CLOSED: &str = "▾";
-    /// Scroll up indicator
     pub const SCROLL_UP: &str = "▲";
-    /// Scroll down indicator
     pub const SCROLL_DOWN: &str = "▼";
-    /// Bullet point
-    pub const BULLET: &str = "•";
-    /// Arrow right
-    pub const ARROW_RIGHT: &str = "→";
-    /// Section icons
-    pub mod icons {
-        /// Source/link icon
-        pub const SOURCE: &str = "🔗";
-        /// Target/list icon
-        pub const TARGET: &str = "📋";
-        /// Output/log icon
-        pub const OUTPUT: &str = "📜";
-        // Info icon (reserved for future use)
-        // pub const INFO: &str = "ℹ";
-        // Warning icon (reserved for future use)
-        // pub const WARNING: &str = "⚠";
-        /// Error icon
-        pub const ERROR: &str = "✖";
-        // Success icon (reserved for future use)
-        // pub const SUCCESS: &str = "✓";
-        /// Loading/spinner frame 1
-        pub const SPINNER_1: &str = "⠋";
-        /// Loading/spinner frame 2
-        pub const SPINNER_2: &str = "⠙";
-        /// Loading/spinner frame 3
-        pub const SPINNER_3: &str = "⠹";
-        /// Loading/spinner frame 4
-        pub const SPINNER_4: &str = "⠸";
-        /// Loading/spinner frame 5
-        pub const SPINNER_5: &str = "⠼";
-        /// Loading/spinner frame 6
-        pub const SPINNER_6: &str = "⠴";
-        /// Loading/spinner frame 7
-        pub const SPINNER_7: &str = "⠦";
-        /// Loading/spinner frame 8
-        pub const SPINNER_8: &str = "⠧";
-    }
-}
 
-/// Get a spinner character based on frame number
-pub fn spinner(frame: usize) -> &'static str {
-    use symbols::icons::*;
-    match frame % 8 {
-        0 => SPINNER_1,
-        1 => SPINNER_2,
-        2 => SPINNER_3,
-        3 => SPINNER_4,
-        4 => SPINNER_5,
-        5 => SPINNER_6,
-        6 => SPINNER_7,
-        _ => SPINNER_8,
+    pub mod icons {
+        pub const OUTPUT: &str = "📜";
     }
 }
