@@ -266,11 +266,12 @@ pub fn discover_fragments_in_dir(dir: &Path) -> Result<Vec<std::path::PathBuf>, 
         .filter(|path| {
             path.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.ends_with(".fragment.yml"))
+                .map(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
                 .unwrap_or(false)
         })
         .collect();
 
+    // Alphabetical order determines priority: later files override earlier
     fragments.sort();
     Ok(fragments)
 }
@@ -749,15 +750,17 @@ gits:
         let dir = tempdir().unwrap();
 
         // Create some fragment files and a non-fragment file
-        File::create(dir.path().join("01-add-repo.fragment.yml")).unwrap();
-        File::create(dir.path().join("02-override.fragment.yml")).unwrap();
-        File::create(dir.path().join("not-a-fragment.yml")).unwrap();
+        File::create(dir.path().join("01-add-repo.yml")).unwrap();
+        File::create(dir.path().join("02-override.yml")).unwrap();
+        File::create(dir.path().join("03-extra.fragment.yml")).unwrap();
         File::create(dir.path().join("readme.md")).unwrap();
 
         let found = discover_fragments_in_dir(dir.path()).unwrap();
-        assert_eq!(found.len(), 2);
-        assert!(found[0].file_name().unwrap().to_str().unwrap() == "01-add-repo.fragment.yml");
-        assert!(found[1].file_name().unwrap().to_str().unwrap() == "02-override.fragment.yml");
+        // All .yml files are discovered, non-yml files ignored
+        assert_eq!(found.len(), 3);
+        assert!(found[0].file_name().unwrap().to_str().unwrap() == "01-add-repo.yml");
+        assert!(found[1].file_name().unwrap().to_str().unwrap() == "02-override.yml");
+        assert!(found[2].file_name().unwrap().to_str().unwrap() == "03-extra.fragment.yml");
     }
 
     #[test]

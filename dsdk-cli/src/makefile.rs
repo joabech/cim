@@ -63,6 +63,40 @@ pub(crate) fn handle_makefile_command(no_dividers: bool) {
         }
     }
 
+    // Apply workspace fragments (.cim/fragments/)
+    let fragments_dir = workspace_path.join(".cim").join("fragments");
+    match dsdk_cli::fragment::discover_fragments_in_dir(&fragments_dir) {
+        Ok(paths) => {
+            let mut fragments = Vec::new();
+            for path in &paths {
+                match config::load_fragment(path) {
+                    Ok(frag) => fragments.push(frag),
+                    Err(e) => {
+                        messages::error(&format!(
+                            "Failed to load fragment {}: {}",
+                            path.display(),
+                            e
+                        ));
+                        return;
+                    }
+                }
+            }
+            if !fragments.is_empty() {
+                messages::info(&format!(
+                    "Applying {} workspace fragment(s)",
+                    fragments.len()
+                ));
+                if let Err(e) = dsdk_cli::fragment::apply_fragments(&mut sdk_config, &fragments) {
+                    messages::error(&format!("Failed to apply fragments: {}", e));
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            messages::verbose(&format!("Could not read fragments directory: {}", e));
+        }
+    }
+
     // CLI --no-dividers always wins
     if no_dividers {
         effective_no_dividers = true;

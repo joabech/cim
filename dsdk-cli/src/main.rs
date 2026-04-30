@@ -68,7 +68,7 @@ fn handle_fragment_command(command: &FragmentCommand) {
 
             messages::status(&format!("Workspace fragments ({}):", fragments.len()));
             for path in &fragments {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let filename = path.file_name().unwrap_or_default().to_string_lossy();
                 if let Ok(frag) = load_fragment(path) {
                     let desc = frag
                         .fragment
@@ -79,14 +79,14 @@ fn handle_fragment_command(command: &FragmentCommand) {
                         .fragment
                         .as_ref()
                         .and_then(|m| m.name.as_deref())
-                        .unwrap_or(&name);
+                        .unwrap_or(&filename);
                     if desc.is_empty() {
-                        messages::info(&format!("  {}", frag_name));
+                        messages::info(&format!("  {}: {}", filename, frag_name));
                     } else {
-                        messages::info(&format!("  {} - {}", frag_name, desc));
+                        messages::info(&format!("  {}: {} - {}", filename, frag_name, desc));
                     }
                 } else {
-                    messages::info(&format!("  {} (parse error)", name));
+                    messages::info(&format!("  {} (parse error)", filename));
                 }
             }
         }
@@ -120,63 +120,154 @@ fn handle_fragment_command(command: &FragmentCommand) {
                 }
             }
         }
-        FragmentCommand::Add { path } => {
-            if !path.exists() {
-                messages::error(&format!("Fragment file not found: {}", path.display()));
-                return;
-            }
-
-            // Validate the fragment parses correctly
-            if let Err(e) = load_fragment(path) {
-                messages::error(&format!("Invalid fragment file: {}", e));
-                return;
-            }
-
+        FragmentCommand::Add { paths, force } => {
             // Create fragments directory if needed
             if let Err(e) = std::fs::create_dir_all(&fragments_dir) {
                 messages::error(&format!("Failed to create fragments directory: {}", e));
                 return;
             }
 
-            let filename = path.file_name().unwrap_or_default();
-            let dest = fragments_dir.join(filename);
-            if dest.exists() {
-                messages::error(&format!("Fragment already exists: {}", dest.display()));
-                return;
-            }
-
-            match std::fs::copy(path, &dest) {
-                Ok(_) => {
-                    messages::success(&format!("Added fragment: {}", filename.to_string_lossy()));
+            for path in paths {
+                if !path.exists() {
+                    messages::error(&format!("Fragment file not found: {}", path.display()));
+                    continue;
                 }
-                Err(e) => {
-                    messages::error(&format!("Failed to copy fragment: {}", e));
+
+                // Validate the fragment parses correctly
+                if let Err(e) = load_fragment(path) {
+                    messages::error(&format!("Invalid fragment file: {}", e));
+                    continue;
+                }
+
+                let filename = path.file_name().unwrap_or_default();
+                let dest = fragments_dir.join(filename);
+                if dest.exists() && !force {
+                    messages::error(&format!("Fragment already exists: {}", dest.display()));
+                    continue;
+                }
+
+                match std::fs::copy(path, &dest) {
+                    Ok(_) => {
+                        messages::success(&format!(
+                            "Added fragment: {}",
+                            filename.to_string_lossy()
+                        ));
+                    }
+                    Err(e) => {
+                        messages::error(&format!("Failed to copy fragment: {}", e));
+                    }
                 }
             }
         }
-        FragmentCommand::Remove { name } => {
-            // Find the fragment file
-            let path = {
-                let candidate = fragments_dir.join(format!("{}.fragment.yml", name));
-                if candidate.exists() {
-                    candidate
-                } else {
-                    let exact = fragments_dir.join(name);
-                    if exact.exists() {
-                        exact
-                    } else {
-                        messages::error(&format!("Fragment not found: {}", name));
-                        return;
+        FragmentCommand::Remove {
+            names,
+            all,
+            interactive,
+        } => {
+            if *all {
+                match dsdk_cli::fragment::discover_fragments_in_dir(&fragments_dir) {
+                    Ok(paths) if paths.is_empty() => {
+                        messages::info("No fragments to remove");
+                    }
+                    Ok(paths) => {
+                        for path in &paths {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            match std::fs::remove_file(path) {
+                                Ok(()) => {
+                                    messages::success(&format!("Removed fragment: {}", name));
+                                }
+                                Err(e) => {
+                                    messages::error(&format!("Failed to remove {}: {}", name, e));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        messages::error(&format!("Failed to read fragments directory: {}", e));
                     }
                 }
-            };
-
-            match std::fs::remove_file(&path) {
-                Ok(()) => {
-                    messages::success(&format!("Removed fragment: {}", name));
+            } else if *interactive {
+                let paths = match dsdk_cli::fragment::discover_fragments_in_dir(&fragments_dir) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        messages::error(&format!("Failed to read fragments directory: {}", e));
+                        return;
+                    }
+                };
+                if paths.is_empty() {
+                    messages::info("No fragments to remove");
+                    return;
                 }
-                Err(e) => {
-                    messages::error(&format!("Failed to remove fragment: {}", e));
+
+                println!(
+                    "Select fragment(s) to remove (comma-separated numbers, or 'q' to cancel):"
+                );
+                for (i, path) in paths.iter().enumerate() {
+                    let filename = path.file_name().unwrap_or_default().to_string_lossy();
+                    println!("  {}) {}", i + 1, filename);
+                }
+                print!("> ");
+                use std::io::Write;
+                std::io::stdout().flush().unwrap_or_default();
+
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_err() {
+                    messages::error("Failed to read input");
+                    return;
+                }
+                let input = input.trim();
+                if input.eq_ignore_ascii_case("q") || input.is_empty() {
+                    messages::info("Cancelled");
+                    return;
+                }
+
+                let indices: Vec<usize> = input
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<usize>().ok())
+                    .filter(|&n| n >= 1 && n <= paths.len())
+                    .collect();
+
+                if indices.is_empty() {
+                    messages::error("No valid selection");
+                    return;
+                }
+
+                for idx in indices {
+                    let path = &paths[idx - 1];
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {
+                            messages::success(&format!("Removed fragment: {}", name));
+                        }
+                        Err(e) => {
+                            messages::error(&format!("Failed to remove {}: {}", name, e));
+                        }
+                    }
+                }
+            } else if names.is_empty() {
+                messages::error(
+                    "No fragment names specified. Use --all, --interactive, or provide names.",
+                );
+            } else {
+                for name in names {
+                    let path = {
+                        let exact = fragments_dir.join(name);
+                        if exact.exists() {
+                            exact
+                        } else {
+                            messages::error(&format!("Fragment not found: {}", name));
+                            continue;
+                        }
+                    };
+
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            messages::success(&format!("Removed fragment: {}", name));
+                        }
+                        Err(e) => {
+                            messages::error(&format!("Failed to remove fragment: {}", e));
+                        }
+                    }
                 }
             }
         }

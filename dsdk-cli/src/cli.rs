@@ -338,15 +338,24 @@ pub enum FragmentCommand {
     },
     /// Add a fragment to the workspace
     Add {
-        /// Path to the fragment file to add
-        #[arg(help = "Path to the .fragment.yml file to add")]
-        path: PathBuf,
+        /// Paths to fragment files to add
+        #[arg(num_args = 1.., help = "Path(s) to fragment .yml file(s) to add")]
+        paths: Vec<PathBuf>,
+        /// Overwrite existing fragments
+        #[arg(short, long, help = "Overwrite existing fragment files")]
+        force: bool,
     },
     /// Remove a fragment from the workspace
     Remove {
-        /// Fragment name to remove
-        #[arg(help = "Name of the fragment to remove")]
-        name: String,
+        /// Fragment names to remove
+        #[arg(num_args = 0.., help = "Name(s) of the fragment(s) to remove")]
+        names: Vec<String>,
+        /// Remove all fragments
+        #[arg(long, help = "Remove all fragments from the workspace")]
+        all: bool,
+        /// Interactively select fragments to remove
+        #[arg(short, long, help = "Interactively select fragment(s) to remove")]
+        interactive: bool,
     },
 }
 
