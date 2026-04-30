@@ -16,6 +16,7 @@ pub mod download;
 pub mod fragment;
 pub mod git_manager;
 pub mod git_operations;
+pub mod merge;
 pub mod messages;
 pub mod toolchain_manager;
 pub mod vscode_tasks_manager;

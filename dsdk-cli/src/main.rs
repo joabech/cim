@@ -183,6 +183,184 @@ fn handle_fragment_command(command: &FragmentCommand) {
     }
 }
 
+fn handle_merge_command(
+    targets: &[String],
+    output: &std::path::Path,
+    source: Option<&str>,
+    mirror_override: Option<&std::path::Path>,
+    fragments: &[std::path::PathBuf],
+    dry_run: bool,
+) {
+    use dsdk_cli::config::{load_config, load_fragment, SdkConfig};
+    use dsdk_cli::fragment::{apply_fragment, validate_merged_config};
+    use dsdk_cli::merge::merge_targets;
+    use dsdk_cli::workspace::get_default_source;
+
+    if targets.len() < 2 {
+        messages::error("At least two targets are required for merge");
+        std::process::exit(1);
+    }
+
+    // Resolve the manifests source directory
+    let source_path = source
+        .map(|s| s.to_string())
+        .unwrap_or_else(get_default_source);
+    let config_root = std::path::Path::new(&source_path);
+
+    if !config_root.exists() {
+        messages::error(&format!(
+            "Manifest source not found: {}",
+            config_root.display()
+        ));
+        std::process::exit(1);
+    }
+
+    messages::status(&format!(
+        "Merging {} targets: {}",
+        targets.len(),
+        targets.join(", ")
+    ));
+
+    // Load all target configurations
+    let mut configs: Vec<(String, SdkConfig)> = Vec::new();
+    for target_name in targets {
+        let config_path = match init_cmd::resolve_target_config(target_name, config_root) {
+            Ok(p) => p,
+            Err(e) => {
+                messages::error(&format!(
+                    "Failed to resolve target '{}': {}",
+                    target_name, e
+                ));
+                std::process::exit(1);
+            }
+        };
+
+        let config = match load_config(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                messages::error(&format!("Failed to load target '{}': {}", target_name, e));
+                std::process::exit(1);
+            }
+        };
+
+        messages::info(&format!(
+            "  Loaded '{}' ({} gits)",
+            target_name,
+            config.gits.len()
+        ));
+        configs.push((target_name.clone(), config));
+    }
+
+    // Build reference pairs for merge
+    let target_refs: Vec<(&str, &SdkConfig)> = configs
+        .iter()
+        .map(|(name, cfg)| (name.as_str(), cfg))
+        .collect();
+
+    let mut result = merge_targets(&target_refs, mirror_override);
+
+    // Apply fragments to the merged result
+    for frag_path in fragments {
+        if !frag_path.exists() {
+            messages::error(&format!("Fragment file not found: {}", frag_path.display()));
+            std::process::exit(1);
+        }
+        match load_fragment(frag_path) {
+            Ok(fragment) => {
+                if let Err(e) = apply_fragment(&mut result.config, &fragment) {
+                    messages::error(&format!(
+                        "Failed to apply fragment '{}': {}",
+                        frag_path.display(),
+                        e
+                    ));
+                    std::process::exit(1);
+                }
+                messages::info(&format!(
+                    "  Applied fragment: {}",
+                    frag_path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            Err(e) => {
+                messages::error(&format!(
+                    "Failed to load fragment '{}': {}",
+                    frag_path.display(),
+                    e
+                ));
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Report conflicts
+    if !result.conflicts.is_empty() {
+        messages::error(&format!("Merge conflicts ({}):", result.conflicts.len()));
+        for conflict in &result.conflicts {
+            messages::error(&format!("  {}", conflict));
+        }
+        messages::error("Resolve conflicts by renaming items or using a fragment to override");
+        std::process::exit(1);
+    }
+
+    // Validate the merged config
+    let warnings = validate_merged_config(&result.config);
+    for warning in &warnings {
+        messages::info(&format!("  Warning: {}", warning));
+    }
+
+    // Print notes
+    for note in &result.notes {
+        messages::info(&format!("  Note: {}", note));
+    }
+
+    if dry_run {
+        messages::status("Dry run — merged configuration:");
+        match serde_yaml::to_string(&result.config) {
+            Ok(yaml) => println!("{}", yaml),
+            Err(e) => {
+                messages::error(&format!("Failed to serialize merged config: {}", e));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Write the merged sdk.yml
+    if let Err(e) = std::fs::create_dir_all(output) {
+        messages::error(&format!(
+            "Failed to create output directory '{}': {}",
+            output.display(),
+            e
+        ));
+        std::process::exit(1);
+    }
+
+    let output_file = output.join("sdk.yml");
+    match serde_yaml::to_string(&result.config) {
+        Ok(yaml) => {
+            if let Err(e) = std::fs::write(&output_file, &yaml) {
+                messages::error(&format!("Failed to write {}: {}", output_file.display(), e));
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            messages::error(&format!("Failed to serialize merged config: {}", e));
+            std::process::exit(1);
+        }
+    }
+
+    messages::success(&format!(
+        "Merged {} targets → {}",
+        targets.len(),
+        output_file.display()
+    ));
+    messages::info(&format!(
+        "  {} gits, {} toolchains, {} install steps",
+        result.config.gits.len(),
+        result.config.toolchains.as_ref().map_or(0, |t| t.len()),
+        result.config.install.as_ref().map_or(0, |i| i.len()),
+    ));
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -324,6 +502,23 @@ fn main() {
         }
         Commands::Fragment { fragment_command } => {
             handle_fragment_command(fragment_command);
+        }
+        Commands::Merge {
+            targets,
+            output,
+            source,
+            mirror,
+            fragments,
+            dry_run,
+        } => {
+            handle_merge_command(
+                targets,
+                output,
+                source.as_deref(),
+                mirror.as_deref(),
+                fragments,
+                *dry_run,
+            );
         }
     }
 }

@@ -281,6 +281,48 @@ pub enum Commands {
         #[command(subcommand)]
         fragment_command: FragmentCommand,
     },
+
+    /// Merge multiple SDK targets into a single configuration
+    Merge {
+        /// Target names to merge (comma-separated or repeatable)
+        #[arg(
+            short,
+            long,
+            value_delimiter = ',',
+            required = true,
+            help = "Target names to merge (comma-separated or repeatable)"
+        )]
+        targets: Vec<String>,
+        /// Output directory for the merged target
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output directory for the merged sdk.yml"
+        )]
+        output: PathBuf,
+        /// Source location for manifest repository
+        #[arg(
+            short,
+            long,
+            value_name = "URL|PATH",
+            help = "Git repository URL or local path to manifests"
+        )]
+        source: Option<String>,
+        /// Override mirror path for the merged configuration
+        #[arg(long, help = "Override mirror path in merged configuration")]
+        mirror: Option<PathBuf>,
+        /// Apply a manifest fragment to the merged result
+        #[arg(
+            long = "fragment",
+            value_name = "PATH",
+            help = "Apply a fragment file to the merged result (repeatable)"
+        )]
+        fragments: Vec<PathBuf>,
+        /// Show merge details without writing output
+        #[arg(long, help = "Show what would be merged without writing files")]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
