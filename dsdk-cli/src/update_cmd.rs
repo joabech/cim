@@ -21,7 +21,7 @@ use dsdk_cli::workspace::{
     expand_config_mirror_path, get_current_workspace, get_default_source, get_docker_temp_dir,
     is_url, resolve_target_config_from_git, WorkspaceMarker,
 };
-use dsdk_cli::{config, docker_manager, git_operations, messages};
+use dsdk_cli::{config, docker_manager, fragment, git_operations, messages};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -318,6 +318,8 @@ pub(crate) fn handle_update_command(
     match_pattern: Option<&str>,
     verbose: bool,
     _cert_validation: Option<&str>,
+    _fragments: &[PathBuf],
+    _no_fragments: bool,
 ) {
     // Start background version check so it runs concurrently with the update
     let version_check = spawn_version_check();
@@ -354,6 +356,87 @@ pub(crate) fn handle_update_command(
             return;
         }
     };
+
+    // --- Fragment application ---
+    // During update, apply workspace-local fragments (.cim/fragments/) and CLI fragments
+    if !_no_fragments {
+        let fragments_dir = workspace_path.join(".cim").join("fragments");
+        match fragment::discover_fragments_in_dir(&fragments_dir) {
+            Ok(paths) => {
+                let mut fragments = Vec::new();
+                for path in &paths {
+                    match config::load_fragment(path) {
+                        Ok(frag) => {
+                            let name = frag
+                                .fragment
+                                .as_ref()
+                                .and_then(|m| m.name.as_deref())
+                                .unwrap_or_else(|| {
+                                    path.file_name()
+                                        .unwrap_or_default()
+                                        .to_str()
+                                        .unwrap_or("<unknown>")
+                                });
+                            messages::verbose(&format!("Discovered workspace fragment: {}", name));
+                            fragments.push(frag);
+                        }
+                        Err(e) => {
+                            messages::error(&format!(
+                                "Failed to load fragment {}: {}",
+                                path.display(),
+                                e
+                            ));
+                            return;
+                        }
+                    }
+                }
+                if !fragments.is_empty() {
+                    messages::info(&format!(
+                        "Applying {} workspace fragment(s)",
+                        fragments.len()
+                    ));
+                    if let Err(e) = fragment::apply_fragments(&mut sdk_config, &fragments) {
+                        messages::error(&format!("Failed to apply fragments: {}", e));
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                messages::verbose(&format!("Could not read fragments directory: {}", e));
+            }
+        }
+    }
+
+    // Apply CLI-specified fragments (--fragment flags)
+    if !_fragments.is_empty() {
+        let mut cli_fragments = Vec::new();
+        for path in _fragments {
+            match config::load_fragment(path) {
+                Ok(frag) => cli_fragments.push(frag),
+                Err(e) => {
+                    messages::error(&format!(
+                        "Failed to load fragment {}: {}",
+                        path.display(),
+                        e
+                    ));
+                    return;
+                }
+            }
+        }
+        if !cli_fragments.is_empty() {
+            messages::info(&format!("Applying {} CLI fragment(s)", cli_fragments.len()));
+            if let Err(e) = fragment::apply_fragments(&mut sdk_config, &cli_fragments) {
+                messages::error(&format!("Failed to apply CLI fragments: {}", e));
+                return;
+            }
+        }
+    }
+
+    // Validate merged config after fragment application
+    let warnings = fragment::validate_merged_config(&sdk_config);
+    for warning in &warnings {
+        messages::info(&format!("Warning: {}", warning));
+    }
 
     // Load and apply user config overrides if present
     let user_config = match config::UserConfig::load() {

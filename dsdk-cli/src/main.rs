@@ -19,7 +19,7 @@ mod utils_cmd;
 mod version;
 
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, FragmentCommand};
 use dsdk_cli::messages;
 use init_cmd::{
     handle_add_command, handle_docs_command, handle_foreach_command, handle_init_command,
@@ -34,6 +34,154 @@ use update_cmd::{
 };
 use utils_cmd::handle_utils_command;
 use version::{print_update_notice, print_version_info, spawn_version_check};
+
+fn handle_fragment_command(command: &FragmentCommand) {
+    use dsdk_cli::config::load_fragment;
+    use dsdk_cli::fragment::discover_fragments_in_dir;
+    use dsdk_cli::workspace::get_current_workspace;
+
+    let workspace_path = match get_current_workspace() {
+        Ok(path) => path,
+        Err(e) => {
+            messages::error(&e);
+            return;
+        }
+    };
+
+    let fragments_dir = workspace_path.join(".cim").join("fragments");
+
+    match command {
+        FragmentCommand::List => {
+            let fragments = match discover_fragments_in_dir(&fragments_dir) {
+                Ok(f) => f,
+                Err(e) => {
+                    messages::error(&format!("Failed to read fragments directory: {}", e));
+                    return;
+                }
+            };
+
+            if fragments.is_empty() {
+                messages::info("No workspace fragments found");
+                messages::info(&format!("Add fragments to: {}", fragments_dir.display()));
+                return;
+            }
+
+            messages::status(&format!("Workspace fragments ({}):", fragments.len()));
+            for path in &fragments {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                if let Ok(frag) = load_fragment(path) {
+                    let desc = frag
+                        .fragment
+                        .as_ref()
+                        .and_then(|m| m.description.as_deref())
+                        .unwrap_or("");
+                    let frag_name = frag
+                        .fragment
+                        .as_ref()
+                        .and_then(|m| m.name.as_deref())
+                        .unwrap_or(&name);
+                    if desc.is_empty() {
+                        messages::info(&format!("  {}", frag_name));
+                    } else {
+                        messages::info(&format!("  {} - {}", frag_name, desc));
+                    }
+                } else {
+                    messages::info(&format!("  {} (parse error)", name));
+                }
+            }
+        }
+        FragmentCommand::Show { name } => {
+            // Try as direct path first, then look in fragments dir
+            let path = if std::path::Path::new(name).exists() {
+                std::path::PathBuf::from(name)
+            } else {
+                let candidate = fragments_dir.join(format!("{}.fragment.yml", name));
+                if candidate.exists() {
+                    candidate
+                } else {
+                    // Try exact name as filename
+                    let exact = fragments_dir.join(name);
+                    if exact.exists() {
+                        exact
+                    } else {
+                        messages::error(&format!("Fragment not found: {}", name));
+                        return;
+                    }
+                }
+            };
+
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    messages::status(&format!("Fragment: {}", path.display()));
+                    println!("{}", content);
+                }
+                Err(e) => {
+                    messages::error(&format!("Failed to read fragment: {}", e));
+                }
+            }
+        }
+        FragmentCommand::Add { path } => {
+            if !path.exists() {
+                messages::error(&format!("Fragment file not found: {}", path.display()));
+                return;
+            }
+
+            // Validate the fragment parses correctly
+            if let Err(e) = load_fragment(path) {
+                messages::error(&format!("Invalid fragment file: {}", e));
+                return;
+            }
+
+            // Create fragments directory if needed
+            if let Err(e) = std::fs::create_dir_all(&fragments_dir) {
+                messages::error(&format!("Failed to create fragments directory: {}", e));
+                return;
+            }
+
+            let filename = path.file_name().unwrap_or_default();
+            let dest = fragments_dir.join(filename);
+            if dest.exists() {
+                messages::error(&format!("Fragment already exists: {}", dest.display()));
+                return;
+            }
+
+            match std::fs::copy(path, &dest) {
+                Ok(_) => {
+                    messages::success(&format!("Added fragment: {}", filename.to_string_lossy()));
+                }
+                Err(e) => {
+                    messages::error(&format!("Failed to copy fragment: {}", e));
+                }
+            }
+        }
+        FragmentCommand::Remove { name } => {
+            // Find the fragment file
+            let path = {
+                let candidate = fragments_dir.join(format!("{}.fragment.yml", name));
+                if candidate.exists() {
+                    candidate
+                } else {
+                    let exact = fragments_dir.join(name);
+                    if exact.exists() {
+                        exact
+                    } else {
+                        messages::error(&format!("Fragment not found: {}", name));
+                        return;
+                    }
+                }
+            };
+
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    messages::success(&format!("Removed fragment: {}", name));
+                }
+                Err(e) => {
+                    messages::error(&format!("Failed to remove fragment: {}", e));
+                }
+            }
+        }
+    }
+}
 
 fn main() {
     let cli = Cli::parse();
@@ -74,6 +222,8 @@ fn main() {
             symlink,
             yes,
             cert_validation,
+            fragments,
+            no_fragments,
         } => {
             // Validate that target is provided
             let target_name = match target {
@@ -100,6 +250,8 @@ fn main() {
                 symlink: *symlink,
                 yes: *yes,
                 _cert_validation: cert_validation.as_deref(),
+                _fragments: fragments.clone(),
+                _no_fragments: *no_fragments,
             });
         }
         Commands::Foreach { command, r#match } => {
@@ -110,12 +262,16 @@ fn main() {
             r#match,
             verbose,
             cert_validation,
+            fragments,
+            no_fragments,
         } => {
             handle_update_command(
                 *no_mirror,
                 r#match.as_deref(),
                 *verbose,
                 cert_validation.as_deref(),
+                fragments,
+                *no_fragments,
             );
         }
         Commands::Makefile { no_dividers } => {
@@ -165,6 +321,9 @@ fn main() {
         }
         Commands::Utils { utils_command } => {
             handle_utils_command(utils_command);
+        }
+        Commands::Fragment { fragment_command } => {
+            handle_fragment_command(fragment_command);
         }
     }
 }

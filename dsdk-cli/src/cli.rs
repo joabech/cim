@@ -125,6 +125,16 @@ pub enum Commands {
             help = "Certificate validation: strict (default), relaxed (insecure), auto"
         )]
         cert_validation: Option<String>,
+        /// Apply manifest fragment files (can be specified multiple times)
+        #[arg(
+            long = "fragment",
+            value_name = "PATH",
+            help = "Apply a manifest fragment file (repeatable)"
+        )]
+        fragments: Vec<PathBuf>,
+        /// Skip automatic fragment discovery and application
+        #[arg(long = "no-fragments", help = "Skip automatic fragment loading")]
+        no_fragments: bool,
     },
     /// Update all git repositories
     Update {
@@ -144,6 +154,16 @@ pub enum Commands {
             help = "Certificate validation: strict (default), relaxed (insecure), auto"
         )]
         cert_validation: Option<String>,
+        /// Apply manifest fragment files (can be specified multiple times)
+        #[arg(
+            long = "fragment",
+            value_name = "PATH",
+            help = "Apply a manifest fragment file (repeatable)"
+        )]
+        fragments: Vec<PathBuf>,
+        /// Skip automatic fragment discovery and application
+        #[arg(long = "no-fragments", help = "Skip automatic fragment loading")]
+        no_fragments: bool,
     },
     /// Execute a command in each repository
     Foreach {
@@ -254,6 +274,36 @@ pub enum Commands {
     Utils {
         #[command(subcommand)]
         utils_command: UtilsCommand,
+    },
+
+    /// Manage manifest fragments for workspace customization
+    Fragment {
+        #[command(subcommand)]
+        fragment_command: FragmentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum FragmentCommand {
+    /// List active fragments in the current workspace
+    List,
+    /// Show the contents of a fragment file
+    Show {
+        /// Fragment name or path
+        #[arg(help = "Fragment name or path to display")]
+        name: String,
+    },
+    /// Add a fragment to the workspace
+    Add {
+        /// Path to the fragment file to add
+        #[arg(help = "Path to the .fragment.yml file to add")]
+        path: PathBuf,
+    },
+    /// Remove a fragment from the workspace
+    Remove {
+        /// Fragment name to remove
+        #[arg(help = "Name of the fragment to remove")]
+        name: String,
     },
 }
 
@@ -605,6 +655,8 @@ mod tests {
                 symlink: _,
                 yes: _,
                 cert_validation: _,
+                fragments: _,
+                no_fragments: _,
             }) => {
                 assert_eq!(target, &Some("my-target".to_string()));
                 assert_eq!(
