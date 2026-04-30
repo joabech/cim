@@ -1424,6 +1424,217 @@ pub fn resolve_clone_order(gits: &[GitConfig]) -> Result<Vec<Vec<GitConfig>>, St
     Ok(tiers)
 }
 
+/// Metadata for a manifest fragment file.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct FragmentMetadata {
+    /// Human-readable name for the fragment
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Description of what the fragment does
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Specifies a copy_file entry to remove, matched by destination path.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RemoveCopyFile {
+    pub dest: String,
+}
+
+/// A manifest fragment that can be applied on top of a base `sdk.yml`.
+///
+/// All fields are optional — a fragment only needs to contain the things it
+/// changes. Items in list fields (gits, toolchains, install) are matched by
+/// their natural key and deep-merged: only specified fields override.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct Fragment {
+    /// Optional metadata about the fragment
+    #[serde(default)]
+    pub fragment: Option<FragmentMetadata>,
+
+    /// Gits to add or modify (matched by `name`)
+    #[serde(default)]
+    pub gits: Option<Vec<FragmentGitConfig>>,
+
+    /// Git names to remove from the base config
+    #[serde(default)]
+    pub remove_gits: Option<Vec<String>>,
+
+    /// Toolchains to add or modify (matched by name via `get_name()`)
+    #[serde(default)]
+    pub toolchains: Option<Vec<FragmentToolchainConfig>>,
+
+    /// Toolchain names to remove from the base config
+    #[serde(default)]
+    pub remove_toolchains: Option<Vec<String>>,
+
+    /// Variables to add or override (shallow merge, fragment wins)
+    #[serde(default)]
+    pub variables: Option<HashMap<String, String>>,
+
+    /// Copy files to append
+    #[serde(default)]
+    pub copy_files: Option<Vec<CopyFileConfig>>,
+
+    /// Copy files to remove (matched by dest)
+    #[serde(default)]
+    pub remove_copy_files: Option<Vec<RemoveCopyFile>>,
+
+    /// Install targets to add or modify (matched by `name`)
+    #[serde(default)]
+    pub install: Option<Vec<InstallConfig>>,
+
+    /// Install target names to remove
+    #[serde(default)]
+    pub remove_install: Option<Vec<String>>,
+
+    /// Override the global build target (replaces entirely)
+    #[serde(default, deserialize_with = "deserialize_sdk_target")]
+    pub build: Option<SdkTarget>,
+
+    /// Override the global test target (replaces entirely)
+    #[serde(default, deserialize_with = "deserialize_sdk_target")]
+    pub test: Option<SdkTarget>,
+
+    /// Override the global clean target (replaces entirely)
+    #[serde(default, deserialize_with = "deserialize_sdk_target")]
+    pub clean: Option<SdkTarget>,
+
+    /// Override the global flash target (replaces entirely)
+    #[serde(default, deserialize_with = "deserialize_sdk_target")]
+    pub flash: Option<SdkTarget>,
+
+    /// Override the global envsetup target (replaces entirely)
+    #[serde(default, deserialize_with = "deserialize_sdk_target")]
+    pub envsetup: Option<SdkTarget>,
+
+    /// Makefile include directives and exclusions to append
+    #[serde(default)]
+    pub makefile_include: Option<MakefileInclude>,
+
+    /// Override the mirror path
+    #[serde(default)]
+    pub mirror: Option<PathBuf>,
+
+    /// Override the build_folder path
+    #[serde(default)]
+    pub build_folder: Option<String>,
+}
+
+/// Git configuration within a fragment. All fields except `name` are optional,
+/// allowing partial overrides of existing git entries.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FragmentGitConfig {
+    pub name: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_commit")]
+    pub commit: Option<String>,
+    #[serde(default, alias = "depends_on")]
+    pub build_depends_on: Option<Vec<String>>,
+    #[serde(default)]
+    pub git_depends_on: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub build: Option<Vec<String>>,
+    #[serde(default)]
+    pub documentation_dir: Option<String>,
+}
+
+/// Toolchain configuration within a fragment. All fields except identification
+/// (name or url) are optional, allowing partial overrides.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FragmentToolchainConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub destination: Option<String>,
+    #[serde(default)]
+    pub strip_components: Option<u32>,
+    #[serde(default)]
+    pub os: Option<String>,
+    #[serde(default)]
+    pub arch: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub mirror_destination: Option<String>,
+    #[serde(default)]
+    pub environment: Option<HashMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub post_install_commands: Option<Vec<String>>,
+}
+
+impl FragmentToolchainConfig {
+    /// Get the effective name for matching against base toolchains.
+    /// Uses same logic as `ToolchainConfig::get_name()`.
+    pub fn get_name(&self) -> Option<String> {
+        if let Some(ref name) = self.name {
+            if !name.is_empty() {
+                return Some(name.clone());
+            }
+        }
+        if let Some(ref url) = self.url {
+            if let Some(filename) = url.split('/').next_back() {
+                if !filename.is_empty() && filename.contains('.') {
+                    return Some(filename.to_string());
+                }
+            }
+            return Some(url.clone());
+        }
+        None
+    }
+}
+
+/// Custom deserializer for an optional commit field in fragments.
+/// Handles strings, floats, and ints the same way as `deserialize_commit`
+/// but wraps the result in Option.
+fn deserialize_optional_commit<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum CommitValue {
+        String(String),
+        Float(f64),
+        Int(i64),
+    }
+
+    let value = Option::<CommitValue>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(CommitValue::String(s)) => Some(s),
+        Some(CommitValue::Float(f)) => Some(f.to_string()),
+        Some(CommitValue::Int(i)) => Some(i.to_string()),
+        None => None,
+    })
+}
+
+/// Load a manifest fragment from a YAML file.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file cannot be read
+/// - The YAML format is invalid
+/// - The YAML structure doesn't match the expected `Fragment` schema
+pub fn load_fragment<P: AsRef<Path>>(path: P) -> Result<Fragment, Box<dyn std::error::Error>> {
+    let path_buf = PathBuf::from(path.as_ref());
+
+    if !path_buf.exists() {
+        return Err(format!("Fragment file not found: {}", path_buf.display()).into());
+    }
+
+    let file_content = fs::read_to_string(&path_buf)
+        .map_err(|e| format!("Cannot read fragment file {}: {}", path_buf.display(), e))?;
+
+    let fragment: Fragment = serde_yaml::from_str(&file_content)
+        .map_err(|e| format!("Fragment validation error in {}: {e}", path_buf.display()))?;
+
+    Ok(fragment)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
