@@ -292,8 +292,10 @@ fn handle_merge_command(
     };
     use dsdk_cli::workspace::get_default_source;
 
-    if targets.len() < 2 {
-        messages::error("At least two targets are required for merge");
+    if targets.len() < 2 && fragments.is_empty() {
+        messages::error(
+            "At least two targets are required for merge (or one target with --fragment)",
+        );
         std::process::exit(1);
     }
 
@@ -312,8 +314,13 @@ fn handle_merge_command(
     }
 
     messages::status(&format!(
-        "Merging {} targets: {}",
+        "Merging {} {}: {}",
         targets.len(),
+        if targets.len() == 1 {
+            "target"
+        } else {
+            "targets"
+        },
         targets.join(", ")
     ));
 
