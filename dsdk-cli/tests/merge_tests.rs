@@ -489,3 +489,73 @@ default: docs
     assert!(yaml.contains("profiles:"));
     assert!(yaml.contains("default: docs"));
 }
+
+#[test]
+fn test_merge_fragment_resolves_git_conflict() {
+    let fixture = TestFixture::new();
+    let target_a = r#"
+mirror: /tmp/mirror
+gits:
+  - name: linux
+    url: https://github.com/torvalds/linux.git
+    commit: v6.0
+"#;
+    let target_b = r#"
+mirror: /tmp/mirror
+gits:
+  - name: linux
+    url: https://github.com/someone/linux-fork.git
+    commit: main
+"#;
+    fixture.write_file("targets/target-a/sdk.yml", target_a);
+    fixture.write_file("targets/target-b/sdk.yml", target_b);
+
+    let cfg_a = load_config(fixture.path().join("targets/target-a/sdk.yml")).unwrap();
+    let cfg_b = load_config(fixture.path().join("targets/target-b/sdk.yml")).unwrap();
+
+    let mut result = merge_targets(&[("target-a", &cfg_a), ("target-b", &cfg_b)], None);
+    assert_eq!(result.conflicts.len(), 1);
+    assert_eq!(result.conflicts[0].key, "linux");
+
+    // Apply a fragment that overrides the conflicting git
+    let fragment_yaml = r#"
+gits:
+  - name: linux
+    url: https://github.com/someone/linux-fork.git
+    commit: special-branch
+"#;
+    fixture.write_file("resolve.fragment.yml", fragment_yaml);
+    let fragment =
+        dsdk_cli::config::load_fragment(fixture.path().join("resolve.fragment.yml")).unwrap();
+
+    // Collect resolved keys from the fragment (mirrors main.rs logic)
+    let mut resolved_keys: std::collections::HashSet<(String, String)> = Default::default();
+    if let Some(ref gits) = fragment.gits {
+        for g in gits {
+            resolved_keys.insert(("gits".to_string(), g.name.clone()));
+        }
+    }
+
+    apply_fragment(&mut result.config, &fragment).unwrap();
+
+    // Prune resolved conflicts
+    result
+        .conflicts
+        .retain(|c| !resolved_keys.contains(&(c.section.clone(), c.key.clone())));
+
+    assert!(
+        result.conflicts.is_empty(),
+        "Fragment should have resolved the conflict, but got: {:?}",
+        result.conflicts
+    );
+
+    // Verify the fragment's value won
+    let linux = result
+        .config
+        .gits
+        .iter()
+        .find(|g| g.name == "linux")
+        .unwrap();
+    assert_eq!(linux.commit, "special-branch");
+    assert_eq!(linux.url, "https://github.com/someone/linux-fork.git");
+}

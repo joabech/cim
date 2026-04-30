@@ -376,7 +376,8 @@ fn handle_merge_command(
 
     let mut result = merge_targets(&target_refs, mirror_override);
 
-    // Apply fragments to the merged result
+    // Apply fragments to the merged result, tracking which keys are resolved
+    let mut resolved_keys: std::collections::HashSet<(String, String)> = Default::default();
     for frag_path in fragments {
         if !frag_path.exists() {
             messages::error(&format!("Fragment file not found: {}", frag_path.display()));
@@ -384,6 +385,56 @@ fn handle_merge_command(
         }
         match load_fragment(frag_path) {
             Ok(fragment) => {
+                // Collect keys that this fragment defines or removes — these
+                // resolve any corresponding merge conflict.
+                if let Some(ref gits) = fragment.gits {
+                    for g in gits {
+                        resolved_keys.insert(("gits".to_string(), g.name.clone()));
+                    }
+                }
+                if let Some(ref remove) = fragment.remove_gits {
+                    for name in remove {
+                        resolved_keys.insert(("gits".to_string(), name.clone()));
+                    }
+                }
+                if let Some(ref tcs) = fragment.toolchains {
+                    for tc in tcs {
+                        if let Some(name) = tc.get_name() {
+                            resolved_keys.insert(("toolchains".to_string(), name));
+                        }
+                    }
+                }
+                if let Some(ref remove) = fragment.remove_toolchains {
+                    for name in remove {
+                        resolved_keys.insert(("toolchains".to_string(), name.clone()));
+                    }
+                }
+                if let Some(ref vars) = fragment.variables {
+                    for key in vars.keys() {
+                        resolved_keys.insert(("variables".to_string(), key.clone()));
+                    }
+                }
+                if let Some(ref cfs) = fragment.copy_files {
+                    for cf in cfs {
+                        resolved_keys.insert(("copy_files".to_string(), cf.dest.clone()));
+                    }
+                }
+                if let Some(ref remove) = fragment.remove_copy_files {
+                    for entry in remove {
+                        resolved_keys.insert(("copy_files".to_string(), entry.dest.clone()));
+                    }
+                }
+                if let Some(ref installs) = fragment.install {
+                    for i in installs {
+                        resolved_keys.insert(("install".to_string(), i.name.clone()));
+                    }
+                }
+                if let Some(ref remove) = fragment.remove_install {
+                    for name in remove {
+                        resolved_keys.insert(("install".to_string(), name.clone()));
+                    }
+                }
+
                 if let Err(e) = apply_fragment(&mut result.config, &fragment) {
                     messages::error(&format!(
                         "Failed to apply fragment '{}': {}",
@@ -406,6 +457,13 @@ fn handle_merge_command(
                 std::process::exit(1);
             }
         }
+    }
+
+    // Remove conflicts resolved by fragments
+    if !resolved_keys.is_empty() {
+        result
+            .conflicts
+            .retain(|c| !resolved_keys.contains(&(c.section.clone(), c.key.clone())));
     }
 
     // Report conflicts
