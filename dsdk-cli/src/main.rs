@@ -285,7 +285,7 @@ fn handle_merge_command(
     use dsdk_cli::config::{
         load_config, load_fragment, load_os_dependencies, load_python_dependencies, SdkConfig,
     };
-    use dsdk_cli::fragment::{apply_fragment, validate_merged_config};
+    use dsdk_cli::fragment::apply_fragment;
     use dsdk_cli::merge::{
         format_merged_yaml, format_os_dependencies_yaml, format_python_dependencies_yaml,
         merge_os_dependencies, merge_python_dependencies, merge_targets,
@@ -360,7 +360,7 @@ fn handle_merge_command(
             }
         };
 
-        messages::info(&format!(
+        messages::status(&format!(
             "  Loaded '{}' ({} gits)",
             display_name,
             config.gits.len()
@@ -443,7 +443,7 @@ fn handle_merge_command(
                     ));
                     std::process::exit(1);
                 }
-                messages::info(&format!(
+                messages::status(&format!(
                     "  Applied fragment: {}",
                     frag_path.file_name().unwrap_or_default().to_string_lossy()
                 ));
@@ -476,15 +476,16 @@ fn handle_merge_command(
         std::process::exit(1);
     }
 
-    // Validate the merged config
-    let warnings = validate_merged_config(&result.config);
-    for warning in &warnings {
-        messages::info(&format!("  Warning: {}", warning));
-    }
-
-    // Print notes
+    // Print notes, filtering out global target warnings that a fragment resolved
     for note in &result.notes {
-        messages::info(&format!("  Note: {}", note));
+        let resolved_by_fragment = (note.starts_with("'build'") && result.config.build.is_some())
+            || (note.starts_with("'test'") && result.config.test.is_some())
+            || (note.starts_with("'clean'") && result.config.clean.is_some())
+            || (note.starts_with("'flash'") && result.config.flash.is_some())
+            || (note.starts_with("'envsetup'") && result.config.envsetup.is_some());
+        if !resolved_by_fragment {
+            messages::info(note);
+        }
     }
 
     // Format the merged sdk.yml using the clean YAML emitter
@@ -506,7 +507,7 @@ fn handle_merge_command(
                 }
                 Err(e) => {
                     messages::info(&format!(
-                        "  Warning: Failed to load os-dependencies.yml from '{}': {}",
+                        "Failed to load os-dependencies.yml from '{}': {}",
                         name, e
                     ));
                 }
@@ -525,7 +526,7 @@ fn handle_merge_command(
                 }
                 Err(e) => {
                     messages::info(&format!(
-                        "  Warning: Failed to load python-dependencies.yml from '{}': {}",
+                        "Failed to load python-dependencies.yml from '{}': {}",
                         name, e
                     ));
                 }
@@ -567,7 +568,7 @@ fn handle_merge_command(
             messages::error(&format!("Failed to write {}: {}", os_output.display(), e));
             std::process::exit(1);
         }
-        messages::info(&format!(
+        messages::status(&format!(
             "  Merged os-dependencies.yml from {} targets",
             os_deps_list.len()
         ));
@@ -586,7 +587,7 @@ fn handle_merge_command(
             messages::error(&format!("Failed to write {}: {}", py_output.display(), e));
             std::process::exit(1);
         }
-        messages::info(&format!(
+        messages::status(&format!(
             "  Merged python-dependencies.yml from {} targets",
             python_deps_list.len()
         ));
@@ -597,7 +598,7 @@ fn handle_merge_command(
         targets.len(),
         output_file.display()
     ));
-    messages::info(&format!(
+    messages::status(&format!(
         "  {} gits, {} toolchains, {} install steps",
         result.config.gits.len(),
         result.config.toolchains.as_ref().map_or(0, |t| t.len()),

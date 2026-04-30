@@ -270,7 +270,7 @@ pub fn merge_targets(
     }
 
     // --- Global targets: omitted ---
-    // Collect which targets define each global target for informational notes
+    // Only warn when 2+ targets define the same global target (actual ambiguity)
     let global_targets = ["build", "test", "clean", "flash", "envsetup"];
     for gt_name in &global_targets {
         let defining_targets: Vec<&str> = targets
@@ -285,9 +285,9 @@ pub fn merge_targets(
             })
             .map(|(name, _)| *name)
             .collect();
-        if !defining_targets.is_empty() {
+        if defining_targets.len() >= 2 {
             notes.push(format!(
-                "Global target '{}' defined in [{}] — omitted from merge, provide via fragment",
+                "'{}' defined in multiple targets ({}), fix or use '--fragment'",
                 gt_name,
                 defining_targets.join(", ")
             ));
@@ -1294,9 +1294,10 @@ mod tests {
         // Global targets should be omitted
         assert!(result.config.build.is_none());
         assert!(result.config.test.is_none());
-        // Notes should mention which targets defined them
+        // Notes should mention global targets defined in 2+ targets
         assert!(result.notes.iter().any(|n| n.contains("build")));
-        assert!(result.notes.iter().any(|n| n.contains("test")));
+        // 'test' only defined in one target, so no note
+        assert!(!result.notes.iter().any(|n| n.contains("test")));
     }
 
     #[test]
