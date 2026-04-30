@@ -168,6 +168,7 @@ Initialize workspace from target.
 ```bash
 cim init --target NAME [--workspace PATH] [--version VERSION]
           [--match REGEX] [--install] [--full] [--symlink] [--no-mirror]
+          [--fragment PATH] [--no-fragments]
 ```
 
 - `--install`: Install toolchains and pip packages after init
@@ -175,13 +176,15 @@ cim init --target NAME [--workspace PATH] [--version VERSION]
 - `--symlink`: Install to mirror with symlinks in workspace
 - `--match REGEX`: Only clone repos matching pattern
 - `--no-mirror`: Disable mirroring for this workspace
+- `--fragment PATH`: Apply a manifest fragment file (repeatable)
+- `--no-fragments`: Skip automatic fragment discovery
 
 #### update
 
 Update git repos in workspace.
 
 ```bash
-cim update [--match REGEX] [--no-mirror]
+cim update [--match REGEX] [--no-mirror] [--fragment PATH] [--no-fragments]
 ```
 
 #### makefile
@@ -329,6 +332,65 @@ cim utils sync-copy-files [--dry-run] [--verbose] [--force]
 ```bash
 cim utils update
 ```
+
+#### merge
+
+Merge multiple SDK targets into a single `sdk.yml`. Useful for
+combining smaller focused targets into a larger workspace. Duplicate
+gits, toolchains, and copy_files are deduplicated; conflicting
+entries keep the first occurrence and emit a warning. Global targets
+(build, test, clean, flash, envsetup) from each source are emitted
+as commented-out YAML suggestions.
+
+```bash
+cim merge --targets TARGET1,TARGET2 --output DIR
+          [--source URL|PATH] [--mirror PATH]
+          [--fragment PATH] [--dry-run]
+```
+
+- `--targets`: Comma or space-separated list of targets to merge
+- `--output`: Directory where the merged `sdk.yml` is written
+- `--source`: Manifest repository URL or local path
+- `--mirror`: Override the mirror path in the merged config
+- `--fragment`: Apply a fragment file to the merged result (repeatable)
+- `--dry-run`: Show what would be merged without writing files
+
+#### fragment
+
+Manage workspace-level manifest fragments stored in `.cim/fragments/`.
+Fragments are `.yml` files that overlay the base `sdk.yml` during
+`cim update` and `cim makefile`, adding or overriding gits,
+toolchains, and build targets. Fragments are applied in alphabetical
+filename order, so numeric prefixes (e.g., `00-base.yml`,
+`10-extras.yml`) control priority.
+
+**list** - Show active fragments
+
+```bash
+cim fragment list
+```
+
+**show** - Display contents of a fragment
+
+```bash
+cim fragment show NAME
+```
+
+**add** - Copy fragment files into the workspace
+
+```bash
+cim fragment add PATH [PATH...] [--force]
+```
+
+**remove** - Remove fragments from the workspace
+
+```bash
+cim fragment remove [NAME...] [--all] [--interactive]
+```
+
+- `--force`: Overwrite existing fragment files
+- `--all`: Remove all fragments
+- `--interactive` (`-i`): Select fragments to remove interactively
 
 ### Configuration File
 

@@ -38,6 +38,11 @@
 #   - utils hash-toolchains: --dry-run, --verbose (-v), --add-missing
 #   - utils sync-copy-files: --dry-run, --verbose (-v), --force (-f)
 #   - utils update: (no options)
+#   - merge: --targets (-t), --output (-o), --source (-s), --mirror, --fragment, --dry-run
+#   - fragment list: (no options)
+#   - fragment show: name
+#   - fragment add: paths, --force (-f)
+#   - fragment remove: names, --all, --interactive (-i)
 
 _cim_completions() {
     local cur prev opts subcommands
@@ -46,7 +51,7 @@ _cim_completions() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # Main commands
-    local main_commands="list-targets init update foreach makefile add install docs docker release config utils help"
+    local main_commands="list-targets init update foreach makefile add install docs docker release config utils merge fragment help"
 
     # Global options
     local global_opts="--help --version -v"
@@ -490,6 +495,82 @@ _cim_completions() {
                     update)
                         COMPREPLY=( $(compgen -W "--help" -- "${cur}") )
                         return 0
+                        ;;
+                esac
+            fi
+            ;;
+
+        merge)
+            case "${prev}" in
+                -t|--targets)
+                    _complete_targets
+                    return 0
+                    ;;
+                -o|--output)
+                    _complete_dir_path
+                    return 0
+                    ;;
+                -s|--source)
+                    COMPREPLY=( $(compgen -d "${cur}") $(compgen -W "https://github.com/ http://localhost:" -- "${cur}") )
+                    return 0
+                    ;;
+                --mirror)
+                    _complete_dir_path
+                    return 0
+                    ;;
+                --fragment)
+                    _complete_file_path
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=( $(compgen -W "--targets -t --output -o --source -s --mirror --fragment --dry-run --help" -- "${cur}") )
+                    return 0
+                    ;;
+            esac
+            ;;
+
+        fragment)
+            if [ $COMP_CWORD -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "list show add remove --help" -- "${cur}") )
+                return 0
+            elif [ $COMP_CWORD -gt 2 ]; then
+                case "${COMP_WORDS[2]}" in
+                    list)
+                        COMPREPLY=( $(compgen -W "--help" -- "${cur}") )
+                        return 0
+                        ;;
+                    show)
+                        # Complete with fragment files in .cim/fragments/
+                        if [ -d ".cim/fragments" ]; then
+                            local frags=$(ls .cim/fragments/*.yml .cim/fragments/*.yaml 2>/dev/null | xargs -I{} basename {})
+                            COMPREPLY=( $(compgen -W "${frags}" -- "${cur}") )
+                        fi
+                        return 0
+                        ;;
+                    add)
+                        case "${prev}" in
+                            *)
+                                if [[ "${cur}" == -* ]]; then
+                                    COMPREPLY=( $(compgen -W "--force -f --help" -- "${cur}") )
+                                else
+                                    _complete_file_path
+                                fi
+                                return 0
+                                ;;
+                        esac
+                        ;;
+                    remove)
+                        case "${prev}" in
+                            *)
+                                if [[ "${cur}" == -* ]]; then
+                                    COMPREPLY=( $(compgen -W "--all --interactive -i --help" -- "${cur}") )
+                                elif [ -d ".cim/fragments" ]; then
+                                    local frags=$(ls .cim/fragments/*.yml .cim/fragments/*.yaml 2>/dev/null | xargs -I{} basename {})
+                                    COMPREPLY=( $(compgen -W "${frags}" -- "${cur}") )
+                                fi
+                                return 0
+                                ;;
+                        esac
                         ;;
                 esac
             fi
