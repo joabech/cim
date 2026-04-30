@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CiM - Merge &amp; Fragment Visualization</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --base: #1e1e2e; --mantle: #181825; --crust: #11111b;
+            --text: #cdd6f4; --subtext0: #a6adc8; --subtext1: #bac2de;
+            --overlay0: #6c7086; --overlay1: #9399b2; --surface0: #313244;
+            --surface1: #45475a; --surface2: #585b70; --blue: #89b4fa;
+            --lavender: #b4befe; --sapphire: #74c7ec; --sky: #89dceb;
+            --teal: #94e2d5; --green: #a6e3a1; --yellow: #f9e2af;
+            --peach: #fab387; --maroon: #eba0ac; --red: #f38ba8;
+            --pink: #f5c2e7; --mauve: #cba6f7;
+            --font-mono: 'JetBrains Mono', monospace;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: var(--font-sans);
+            background: var(--base);
+            color: var(--text);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 0 24px; }
+
+        /* Header */
+        header {
+            padding: 48px 0 32px;
+            text-align: center;
+            border-bottom: 1px solid var(--surface0);
+        }
+        header h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--blue), var(--lavender), var(--pink));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 8px;
+        }
+        header p {
+            color: var(--subtext0);
+            font-size: 1.1rem;
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        /* Tab navigation */
+        .tabs {
+            display: flex;
+            justify-content: center;
+            gap: 4px;
+            padding: 24px 0;
+            position: sticky;
+            top: 0;
+            background: var(--base);
+            z-index: 100;
+            border-bottom: 1px solid var(--surface0);
+        }
+        .tab {
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--subtext0);
+            background: transparent;
+            border: 1px solid transparent;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .tab:hover { color: var(--text); background: var(--surface0); }
+        .tab.active {
+            color: var(--blue);
+            background: var(--surface0);
+            border-color: var(--blue);
+        }
+
+        /* Sections */
+        .section {
+            display: none;
+            padding: 48px 0;
+        }
+        .section.active { display: block; }
+        .section h2 {
+            font-size: 1.6rem;
+            margin-bottom: 8px;
+        }
+        .section .subtitle {
+            color: var(--subtext0);
+            margin-bottom: 32px;
+            font-size: 0.95rem;
+        }
+
+        /* Visualization area */
+        .viz-container {
+            background: var(--mantle);
+            border: 1px solid var(--surface0);
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 24px;
+            min-height: 500px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid var(--surface1);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: var(--surface0);
+            color: var(--text);
+        }
+        .btn:hover { background: var(--surface1); transform: translateY(-1px); }
+        .btn.active { border-color: var(--blue); color: var(--blue); }
+        .btn-primary {
+            background: linear-gradient(135deg, var(--blue), var(--lavender));
+            color: var(--crust);
+            border: none;
+        }
+        .btn-primary:hover { box-shadow: 0 4px 16px rgba(137, 180, 250, 0.3); }
+
+        /* Info panel */
+        .info-panel {
+            background: var(--surface0);
+            border: 1px solid var(--surface1);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-top: 16px;
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+        .info-panel code {
+            font-family: var(--font-mono);
+            background: var(--mantle);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            color: var(--peach);
+        }
+        .info-panel strong { color: var(--blue); }
+
+        /* D3 node styles */
+        .node rect {
+            stroke-width: 2;
+            rx: 8;
+            ry: 8;
+            cursor: pointer;
+            transition: filter 0.2s;
+        }
+        .node rect:hover { filter: brightness(1.2); }
+        .node text {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            fill: var(--text);
+            pointer-events: none;
+        }
+        .node .label {
+            font-family: var(--font-sans);
+            font-size: 11px;
+            fill: var(--subtext0);
+        }
+        .link {
+            fill: none;
+            stroke-width: 2;
+            opacity: 0.7;
+        }
+        .link.animated {
+            stroke-dasharray: 8 4;
+            animation: dash 1s linear infinite;
+        }
+        @keyframes dash { to { stroke-dashoffset: -12; } }
+
+        .arrow-marker { fill: var(--overlay0); }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            padding: 12px 16px;
+            background: var(--surface0);
+            border-radius: 8px;
+            margin-top: 16px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+            color: var(--subtext1);
+        }
+        .legend-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 4px;
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: var(--crust);
+            border: 1px solid var(--surface1);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 0.85rem;
+            color: var(--text);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            max-width: 300px;
+            z-index: 200;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+        .tooltip.visible { opacity: 1; }
+        .tooltip code {
+            font-family: var(--font-mono);
+            color: var(--peach);
+            font-size: 0.8em;
+        }
+
+        /* Step indicator */
+        .step-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .step-dot {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 600;
+            background: var(--surface0);
+            color: var(--subtext0);
+            border: 2px solid var(--surface1);
+            transition: all 0.3s;
+        }
+        .step-dot.active {
+            background: var(--blue);
+            color: var(--crust);
+            border-color: var(--blue);
+        }
+        .step-dot.done {
+            background: var(--green);
+            color: var(--crust);
+            border-color: var(--green);
+        }
+        .step-line {
+            width: 32px;
+            height: 2px;
+            background: var(--surface1);
+            transition: background 0.3s;
+        }
+        .step-line.done { background: var(--green); }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            header h1 { font-size: 1.8rem; }
+            .tabs { gap: 2px; }
+            .tab { padding: 8px 12px; font-size: 12px; }
+            .viz-container { padding: 16px; min-height: 400px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>CiM Merge &amp; Fragment</h1>
+        <p>Interactive visualization of how <code>cim merge</code> combines targets and how fragments layer modifications on top.</p>
+    </header>
+
+    <div class="container">
+        <div class="tabs">
+            <button class="tab active" data-tab="merge-basic">Merge (no fragment)</button>
+            <button class="tab" data-tab="merge-fragment">Merge + Fragment</button>
+            <button class="tab" data-tab="fragment-apply">Fragment Apply</button>
+        </div>
+
+        <!-- Section 1: Merge without fragments -->
+        <div class="section active" id="merge-basic">
+            <h2>cim merge &mdash; Two Targets, No Fragment</h2>
+            <p class="subtitle">Peer merge: items combined by unique key, conflicts abort. First target wins for scalars. Global targets omitted.</p>
+            <div class="controls">
+                <button class="btn btn-primary" id="merge-basic-play">&#9654; Play</button>
+                <button class="btn" id="merge-basic-prev">&#9664; Prev</button>
+                <button class="btn" id="merge-basic-next">Next &#9654;</button>
+                <button class="btn" id="merge-basic-reset">Reset</button>
+            </div>
+            <div class="step-indicator" id="merge-basic-steps"></div>
+            <div class="viz-container" id="viz-merge-basic"></div>
+            <div class="legend">
+                <div class="legend-item"><div class="legend-dot" style="background: var(--blue)"></div>Target A (first)</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--mauve)"></div>Target B (second)</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--green)"></div>Merged (no conflict)</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--red)"></div>Conflict (abort)</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--yellow)"></div>Omitted (global target)</div>
+            </div>
+            <div class="info-panel">
+                <strong>Merge Rules:</strong><br>
+                &bull; <strong>Gits</strong>: matched by <code>name</code>. Identical &rarr; deduplicated. Different &rarr; conflict.<br>
+                &bull; <strong>Toolchains</strong>: matched by <code>get_name()</code>. Same logic as gits.<br>
+                &bull; <strong>Variables</strong>: combined. Same key + different value &rarr; conflict.<br>
+                &bull; <strong>Mirror</strong>: first target wins. Note printed if they differ.<br>
+                &bull; <strong>Global targets</strong> (build, test, clean, flash, envsetup): omitted &mdash; shown as comments.
+            </div>
+        </div>
+
+        <!-- Section 2: Merge with fragment -->
+        <div class="section" id="merge-fragment">
+            <h2>cim merge &mdash; With Fragment Override</h2>
+            <p class="subtitle">Targets merged first, then fragment applied. Fragment resolves conflicts and supplies global targets.</p>
+            <div class="controls">
+                <button class="btn btn-primary" id="merge-fragment-play">&#9654; Play</button>
+                <button class="btn" id="merge-fragment-prev">&#9664; Prev</button>
+                <button class="btn" id="merge-fragment-next">Next &#9654;</button>
+                <button class="btn" id="merge-fragment-reset">Reset</button>
+            </div>
+            <div class="step-indicator" id="merge-fragment-steps"></div>
+            <div class="viz-container" id="viz-merge-fragment"></div>
+            <div class="legend">
+                <div class="legend-item"><div class="legend-dot" style="background: var(--blue)"></div>Target A</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--mauve)"></div>Target B</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--peach)"></div>Fragment</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--green)"></div>Resolved / Merged</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--teal)"></div>Fragment wins</div>
+            </div>
+            <div class="info-panel">
+                <strong>With <code>--fragment</code>:</strong><br>
+                &bull; Merge runs first &mdash; conflicts are recorded but not immediately fatal.<br>
+                &bull; Fragment keys that match a conflict &rarr; conflict removed from the list.<br>
+                &bull; Fragment can supply <code>build</code>, <code>test</code>, <code>clean</code>, <code>flash</code>, <code>envsetup</code> directly.<br>
+                &bull; Only conflicts NOT covered by the fragment cause an abort.<br>
+                &bull; Fragment can also <code>remove_gits</code>, <code>remove_toolchains</code>, etc.
+            </div>
+        </div>
+
+        <!-- Section 3: Fragment apply -->
+        <div class="section" id="fragment-apply">
+            <h2>cim fragment &mdash; Layer on Existing Config</h2>
+            <p class="subtitle">Fragments are overlays: remove first, then add/modify, then replace scalars. Fragment always wins.</p>
+            <div class="controls">
+                <button class="btn btn-primary" id="fragment-apply-play">&#9654; Play</button>
+                <button class="btn" id="fragment-apply-prev">&#9664; Prev</button>
+                <button class="btn" id="fragment-apply-next">Next &#9654;</button>
+                <button class="btn" id="fragment-apply-reset">Reset</button>
+            </div>
+            <div class="step-indicator" id="fragment-apply-steps"></div>
+            <div class="viz-container" id="viz-fragment-apply"></div>
+            <div class="legend">
+                <div class="legend-item"><div class="legend-dot" style="background: var(--blue)"></div>Base Config</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--peach)"></div>Fragment</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--red)"></div>Removed</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--teal)"></div>Modified / Added</div>
+                <div class="legend-item"><div class="legend-dot" style="background: var(--green)"></div>Final Result</div>
+            </div>
+            <div class="info-panel">
+                <strong>Fragment Apply Order:</strong><br>
+                <strong>1. Remove</strong> &mdash; <code>remove_gits</code>, <code>remove_toolchains</code>, <code>remove_copy_files</code>, <code>remove_install</code><br>
+                <strong>2. Add/Modify</strong> &mdash; List items matched by key: if found &rarr; deep-merge (only <code>Some</code> fields override). If new &rarr; append.<br>
+                <strong>3. Variables</strong> &mdash; Shallow merge, fragment values win on collision.<br>
+                <strong>4. Scalars</strong> &mdash; <code>mirror</code>, <code>build_folder</code> replaced entirely.<br>
+                <strong>5. Global targets</strong> &mdash; <code>build</code>, <code>test</code>, <code>clean</code>, <code>flash</code>, <code>envsetup</code> replaced entirely.<br>
+                <strong>6. Makefile include</strong> &mdash; <code>files</code> and <code>exclude</code> lists appended.
+            </div>
+        </div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+    // Color constants matching CSS variables
+    const C = {
+        base: '#1e1e2e', mantle: '#181825', crust: '#11111b',
+        text: '#cdd6f4', subtext0: '#a6adc8', surface0: '#313244',
+        surface1: '#45475a', blue: '#89b4fa', lavender: '#b4befe',
+        sapphire: '#74c7ec', teal: '#94e2d5', green: '#a6e3a1',
+        yellow: '#f9e2af', peach: '#fab387', red: '#f38ba8',
+        pink: '#f5c2e7', mauve: '#cba6f7', overlay0: '#6c7086'
+    };
+
+    // =========================================================================
+    // Tab switching
+    // =========================================================================
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            tab.classList.add('active');
+            document.getElementById(tab.dataset.tab).classList.add('active');
+        });
+    });
+
+    // =========================================================================
+    // Tooltip
+    // =========================================================================
+    const tooltip = document.getElementById('tooltip');
+    function showTooltip(evt, html) {
+        tooltip.innerHTML = html;
+        tooltip.classList.add('visible');
+        const x = evt.pageX + 12;
+        const y = evt.pageY - 12;
+        tooltip.style.left = x + 'px';
+        tooltip.style.top = y + 'px';
+    }
+    function hideTooltip() { tooltip.classList.remove('visible'); }
+
+    // =========================================================================
+    // Utility: create step indicators
+    // =========================================================================
+    function createSteps(containerId, steps) {
+        const container = document.getElementById(containerId);
+        container.innerHTML = '';
+        steps.forEach((label, i) => {
+            if (i > 0) {
+                const line = document.createElement('div');
+                line.className = 'step-line';
+                line.id = `${containerId}-line-${i}`;
+                container.appendChild(line);
+            }
+            const dot = document.createElement('div');
+            dot.className = 'step-dot';
+            dot.id = `${containerId}-dot-${i}`;
+            dot.textContent = i + 1;
+            dot.title = label;
+            container.appendChild(dot);
+        });
+    }
+    function activateStep(containerId, stepIndex, totalSteps) {
+        for (let i = 0; i < totalSteps; i++) {
+            const dot = document.getElementById(`${containerId}-dot-${i}`);
+            const line = document.getElementById(`${containerId}-line-${i}`);
+            if (i < stepIndex) {
+                dot.className = 'step-dot done';
+                if (line) line.className = 'step-line done';
+            } else if (i === stepIndex) {
+                dot.className = 'step-dot active';
+                if (line) line.className = 'step-line done';
+            } else {
+                dot.className = 'step-dot';
+                if (line) line.className = 'step-line';
+            }
+        }
+    }
+
+    // =========================================================================
+    // Section 1: Merge (no fragment)
+    // =========================================================================
+    (function() {
+        const containerId = 'viz-merge-basic';
+        const stepsId = 'merge-basic-steps';
+        const stepLabels = ['Load targets', 'Match items by key', 'Detect conflicts', 'Emit merged YAML'];
+        createSteps(stepsId, stepLabels);
+
+        const width = 1000, height = 480;
+        const svg = d3.select(`#${containerId}`).append('svg')
+            .attr('viewBox', `0 0 ${width} ${height}`)
+            .attr('width', '100%')
+            .attr('height', height);
+
+        // Arrow marker
+        svg.append('defs').append('marker')
+            .attr('id', 'arrow-basic')
+            .attr('viewBox', '0 0 10 10')
+            .attr('refX', 10).attr('refY', 5)
+            .attr('markerWidth', 6).attr('markerHeight', 6)
+            .attr('orient', 'auto')
+            .append('path').attr('d', 'M0,0 L10,5 L0,10 Z').attr('fill', C.overlay0);
+
+        // Data
+        const targetA = {
+            label: 'Target A', color: C.blue, x: 50, y: 40,
+            items: [
+                { type: 'git', name: 'no-OS', extra: 'commit: main' },
+                { type: 'git', name: 'linux', extra: 'commit: v6.6' },
+                { type: 'toolchain', name: 'arm-gcc', extra: 'v13.3' },
+                { type: 'variable', name: 'PLATFORM', extra: '= adin1110' },
+                { type: 'build', name: 'build', extra: '@echo "build A"' },
+            ]
+        };
+        const targetB = {
+            label: 'Target B', color: C.mauve, x: 50, y: 270,
+            items: [
+                { type: 'git', name: 'no-OS', extra: 'commit: develop' },
+                { type: 'git', name: 'zephyr', extra: 'commit: v3.7' },
+                { type: 'toolchain', name: 'arm-gcc', extra: 'v14.3' },
+                { type: 'variable', name: 'BOARD', extra: '= nrf52' },
+                { type: 'build', name: 'build', extra: '@echo "build B"' },
+            ]
+        };
+
+        let animState = { running: false, timer: null };
+
+        function draw() {
+            svg.selectAll('g.target-group').remove();
+            svg.selectAll('g.result-group').remove();
+            svg.selectAll('.merge-link').remove();
+
+            // Draw target boxes
+            [targetA, targetB].forEach(target => {
+                const g = svg.append('g').attr('class', 'target-group')
+                    .attr('transform', `translate(${target.x}, ${target.y})`);
+
+                g.append('rect')
+                    .attr('width', 340).attr('height', 30 + target.items.length * 32)
+                    .attr('fill', C.surface0).attr('stroke', target.color)
+                    .attr('stroke-width', 2).attr('rx', 8);
+
+                g.append('text').attr('x', 16).attr('y', 22)
+                    .attr('fill', target.color).attr('font-weight', 600)
+                    .attr('font-family', 'Inter').attr('font-size', 14)
+                    .text(target.label);
+
+                target.items.forEach((item, i) => {
+                    const ig = g.append('g')
+                        .attr('class', `item item-${item.name}`)
+                        .attr('transform', `translate(16, ${38 + i * 32})`);
+
+                    ig.append('rect')
+                        .attr('width', 308).attr('height', 26)
+                        .attr('fill', C.mantle).attr('rx', 4)
+                        .attr('stroke', C.surface1).attr('stroke-width', 1);
+
+                    ig.append('text').attr('x', 8).attr('y', 17)
+                        .attr('font-family', 'JetBrains Mono').attr('font-size', 11)
+                        .attr('fill', C.text)
+                        .text(`${item.type}: ${item.name}`);
+
+                    ig.append('text').attr('x', 180).attr('y', 17)
+                        .attr('font-family', 'JetBrains Mono').attr('font-size', 10)
+                        .attr('fill', C.subtext0)
+                        .text(item.extra);
+
+                    ig.on('mouseover', (evt) => {
+                        showTooltip(evt, `<strong>${item.type}</strong>: <code>${item.name}</code><br>${item.extra}`);
+                    }).on('mouseout', hideTooltip);
+                });
+            });
+        }
+
+        function drawResult(step) {
+            svg.selectAll('g.result-group').remove();
+            svg.selectAll('.merge-link').remove();
+
+            const rx = 550, ry = 60;
+            const g = svg.append('g').attr('class', 'result-group')
+                .attr('transform', `translate(${rx}, ${ry})`);
+
+            const resultItems = [];
+
+            if (step >= 1) {
+                // Unique items from A
+                resultItems.push({ name: 'linux', type: 'git', color: C.green, note: 'From A (unique)' });
+                // Unique items from B
+                resultItems.push({ name: 'zephyr', type: 'git', color: C.green, note: 'From B (unique)' });
+                // Unique variable
+                resultItems.push({ name: 'BOARD', type: 'variable', color: C.green, note: 'From B (unique)' });
+                resultItems.push({ name: 'PLATFORM', type: 'variable', color: C.green, note: 'From A (unique)' });
+            }
+            if (step >= 2) {
+                // Conflicts
+                resultItems.push({ name: 'no-OS', type: 'git', color: C.red, note: 'CONFLICT: main vs develop' });
+                resultItems.push({ name: 'arm-gcc', type: 'toolchain', color: C.red, note: 'CONFLICT: v13.3 vs v14.3' });
+            }
+            if (step >= 3) {
+                resultItems.push({ name: 'build', type: 'global', color: C.yellow, note: 'Omitted (commented)' });
+            }
+
+            const boxH = 40 + resultItems.length * 30;
+            g.append('rect')
+                .attr('width', 380).attr('height', boxH)
+                .attr('fill', C.surface0).attr('stroke', step >= 3 ? C.red : C.green)
+                .attr('stroke-width', 2).attr('rx', 8)
+                .attr('opacity', 0)
+                .transition().duration(400).attr('opacity', 1);
+
+            g.append('text').attr('x', 16).attr('y', 24)
+                .attr('fill', step >= 3 ? C.red : C.green).attr('font-weight', 600)
+                .attr('font-family', 'Inter').attr('font-size', 14)
+                .text(step >= 3 ? 'Result (has conflicts!)' : 'Merged Result');
+
+            resultItems.forEach((item, i) => {
+                const ig = g.append('g')
+                    .attr('transform', `translate(16, ${38 + i * 30})`)
+                    .attr('opacity', 0);
+
+                ig.transition().delay(i * 100).duration(300).attr('opacity', 1);
+
+                ig.append('rect')
+                    .attr('width', 348).attr('height', 24)
+                    .attr('fill', C.mantle).attr('rx', 4)
+                    .attr('stroke', item.color).attr('stroke-width', 1);
+
+                ig.append('text').attr('x', 8).attr('y', 16)
+                    .attr('font-family', 'JetBrains Mono').attr('font-size', 11)
+                    .attr('fill', item.color)
+                    .text(`${item.type}: ${item.name}`);
+
+                ig.append('text').attr('x', 180).attr('y', 16)
+                    .attr('font-family', 'JetBrains Mono').attr('font-size', 9)
+                    .attr('fill', C.subtext0)
+                    .text(item.note);
+
+                ig.on('mouseover', (evt) => {
+                    showTooltip(evt, `<code>${item.name}</code><br>${item.note}`);
+                }).on('mouseout', hideTooltip);
+            });
+
+            // Draw links from targets to result
+            const linkData = [
+                { x1: 390, y1: 120, x2: rx, y2: ry + boxH / 2 },
+                { x1: 390, y1: 360, x2: rx, y2: ry + boxH / 2 }
+            ];
+            linkData.forEach(l => {
+                svg.append('path')
+                    .attr('class', 'merge-link')
+                    .attr('d', `M${l.x1},${l.y1} C${l.x1 + 80},${l.y1} ${l.x2 - 80},${l.y2} ${l.x2},${l.y2}`)
+                    .attr('stroke', C.overlay0)
+                    .attr('stroke-width', 2)
+                    .attr('fill', 'none')
+                    .attr('marker-end', 'url(#arrow-basic)')
+                    .attr('stroke-dasharray', '6 3')
+                    .attr('opacity', 0)
+                    .transition().duration(500).attr('opacity', 0.6);
+            });
+        }
+
+        draw();
+
+        let currentStep = -1;
+
+        function goToStep(step) {
+            animState.running = false;
+            clearTimeout(animState.timer);
+            currentStep = Math.max(-1, Math.min(step, stepLabels.length - 1));
+            if (currentStep >= 0) {
+                activateStep(stepsId, currentStep, stepLabels.length);
+                drawResult(currentStep);
+            } else {
+                svg.selectAll('g.result-group').remove();
+                svg.selectAll('.merge-link').remove();
+                createSteps(stepsId, stepLabels);
+            }
+        }
+
+        document.getElementById('merge-basic-play').addEventListener('click', () => {
+            if (animState.running) return;
+            animState.running = true;
+            currentStep = 0;
+
+            function next() {
+                activateStep(stepsId, currentStep, stepLabels.length);
+                drawResult(currentStep);
+                currentStep++;
+                if (currentStep <= 3) {
+                    animState.timer = setTimeout(next, 1200);
+                } else {
+                    currentStep = 3;
+                    animState.running = false;
+                }
+            }
+            next();
+        });
+
+        document.getElementById('merge-basic-prev').addEventListener('click', () => {
+            goToStep(currentStep - 1);
+        });
+
+        document.getElementById('merge-basic-next').addEventListener('click', () => {
+            goToStep(currentStep + 1);
+        });
+
+        document.getElementById('merge-basic-reset').addEventListener('click', () => {
+            goToStep(-1);
+            draw();
+        });
+    })();
+
+    // =========================================================================
+    // Section 2: Merge with fragment
+    // =========================================================================
+    (function() {
+        const containerId = 'viz-merge-fragment';
+        const stepsId = 'merge-fragment-steps';
+        const stepLabels = ['Merge targets', 'Record conflicts', 'Apply fragment', 'Resolve conflicts', 'Emit result'];
+        createSteps(stepsId, stepLabels);
+
+        const width = 1100, height = 520;
+        const svg = d3.select(`#${containerId}`).append('svg')
+            .attr('viewBox', `0 0 ${width} ${height}`)
+            .attr('width', '100%')
+            .attr('height', height);
+
+        svg.append('defs').append('marker')
+            .attr('id', 'arrow-frag')
+            .attr('viewBox', '0 0 10 10')
+            .attr('refX', 10).attr('refY', 5)
+            .attr('markerWidth', 6).attr('markerHeight', 6)
+            .attr('orient', 'auto')
+            .append('path').attr('d', 'M0,0 L10,5 L0,10 Z').attr('fill', C.overlay0);
+
+        let animState = { running: false, timer: null };
+
+        function draw(step) {
+            svg.selectAll('*:not(defs)').remove();
+
+            // Target A
+            const aG = svg.append('g').attr('transform', 'translate(30, 30)');
+            aG.append('rect').attr('width', 240).attr('height', 150)
+                .attr('fill', C.surface0).attr('stroke', C.blue).attr('stroke-width', 2).attr('rx', 8);
+            aG.append('text').attr('x', 12).attr('y', 22).attr('fill', C.blue)
+                .attr('font-weight', 600).attr('font-family', 'Inter').attr('font-size', 13).text('Target A');
+            const aItems = ['git: no-OS (main)', 'git: linux (v6.6)', 'tc: arm-gcc (v13.3)', 'build: make all'];
+            aItems.forEach((t, i) => {
+                aG.append('text').attr('x', 16).attr('y', 48 + i * 26)
+                    .attr('font-family', 'JetBrains Mono').attr('font-size', 11).attr('fill', C.text).text(t);
+            });
+
+            // Target B
+            const bG = svg.append('g').attr('transform', 'translate(30, 210)');
+            bG.append('rect').attr('width', 240).attr('height', 150)
+                .attr('fill', C.surface0).attr('stroke', C.mauve).attr('stroke-width', 2).attr('rx', 8);
+            bG.append('text').attr('x', 12).attr('y', 22).attr('fill', C.mauve)
+                .attr('font-weight', 600).attr('font-family', 'Inter').attr('font-size', 13).text('Target B');
+            const bItems = ['git: no-OS (develop)', 'git: zephyr (v3.7)', 'tc: arm-gcc (v14.3)', 'build: west build'];
+            bItems.forEach((t, i) => {
+                bG.append('text').attr('x', 16).attr('y', 48 + i * 26)
+                    .attr('font-family', 'JetBrains Mono').attr('font-size', 11).attr('fill', C.text).text(t);
+            });
+
+            // Fragment
+            const fG = svg.append('g').attr('transform', 'translate(30, 400)');
+            fG.append('rect').attr('width', 240).attr('height', 100)
+                .attr('fill', C.surface0).attr('stroke', C.peach).attr('stroke-width', 2).attr('rx', 8)
+                .attr('stroke-dasharray', '6 3');
+            fG.append('text').attr('x', 12).attr('y', 22).attr('fill', C.peach)
+                .attr('font-weight', 600).attr('font-family', 'Inter').attr('font-size', 13).text('Fragment (--fragment)');
+            const fItems = ['git: no-OS (v2.1.0)', 'tc: arm-gcc (v14.3)', 'build: make sdk-build'];
+            fItems.forEach((t, i) => {
+                fG.append('text').attr('x', 16).attr('y', 48 + i * 26)
+                    .attr('font-family', 'JetBrains Mono').attr('font-size', 11).attr('fill', C.peach).text(t);
+            });
+
+            if (step >= 0) {
+                // Merge box (middle)
+                const mX = 360, mY = 60;
+                svg.append('path')
+                    .attr('d', `M270,100 C320,100 ${mX-40},160 ${mX},160`)
+                    .attr('stroke', C.overlay0).attr('fill', 'none').attr('stroke-width', 1.5)
+                    .attr('marker-end', 'url(#arrow-frag)').attr('stroke-dasharray', '4 2');
+                svg.append('path')
+                    .attr('d', `M270,280 C320,280 ${mX-40},200 ${mX},200`)
+                    .attr('stroke', C.overlay0).attr('fill', 'none').attr('stroke-width', 1.5)
+                    .attr('marker-end', 'url(#arrow-frag)').attr('stroke-dasharray', '4 2');
+
+                if (step >= 1) {
+                    const mG = svg.append('g').attr('transform', `translate(${mX}, ${mY})`);
+                    const mColor = step < 3 ? C.red : C.green;
+                    mG.append('rect').attr('width', 280).attr('height', 200)
+                        .attr('fill', C.surface0).attr('stroke', mColor).attr('stroke-width', 2).attr('rx', 8);
+                    mG.append('text').attr('x', 12).attr('y', 22).attr('fill', mColor)
+                        .attr('font-weight', 600).attr('font-family', 'Inter').attr('font-size', 13)
+                        .text(step < 3 ? 'After Merge (conflicts)' : 'After Fragment');
+
+                    const mItems = step < 3 ? [
+                        { t: 'git: no-OS', c: C.red, note: 'CONFLICT' },
+                        { t: 'git: linux', c: C.green, note: 'unique' },
+                        { t: 'git: zephyr', c: C.green, note: 'unique' },
+                        { t: 'tc: arm-gcc', c: C.red, note: 'CONFLICT' },
+                        { t: 'build', c: C.yellow, note: 'omitted' },
+                    ] : [
+                        { t: 'git: no-OS (v2.1.0)', c: C.teal, note: 'fragment wins' },
+                        { t: 'git: linux', c: C.green, note: 'kept' },
+                        { t: 'git: zephyr', c: C.green, note: 'kept' },
+                        { t: 'tc: arm-gcc (v14.3)', c: C.teal, note: 'fragment wins' },
+                        { t: 'build: make sdk-build', c: C.teal, note: 'from fragment' },
+                    ];
+
+                    mItems.forEach((item, i) => {
+                        const row = mG.append('g').attr('transform', `translate(12, ${42 + i * 30})`);
+                        row.append('rect').attr('width', 256).attr('height', 24)
+                            .attr('fill', C.mantle).attr('rx', 4).attr('stroke', item.c).attr('stroke-width', 1);
+                        row.append('text').attr('x', 8).attr('y', 16)
+                            .attr('font-family', 'JetBrains Mono').attr('font-size', 10)
+                            .attr('fill', item.c).text(item.t);
+                        row.append('text').attr('x', 200).attr('y', 16)
+                            .attr('font-family', 'JetBrains Mono').attr('font-size', 9)
+                            .attr('fill', C.subtext0).text(item.note);
+                    });
+
+                    // Fragment arrow to merge result
+                    if (step >= 2) {
+                        svg.append('path')
+                            .attr('d', `M270,440 C380,440 ${mX - 20},280 ${mX + 140},${mY + 200}`)
+                            .attr('stroke', C.peach).attr('fill', 'none').attr('stroke-width', 2)
+                            .attr('marker-end', 'url(#arrow-frag)')
+                            .attr('class', 'link animated')
+                            .attr('opacity', 0)
+                            .transition().duration(500).attr('opacity', 0.8);
+                    }
+
+                    // Final output
+                    if (step >= 4) {
+                        const oX = 720, oY = 100;
+                        svg.append('path')
+                            .attr('d', `M${mX + 280},${mY + 100} C${mX + 320},${mY + 100} ${oX - 40},${oY + 80} ${oX},${oY + 80}`)
+                            .attr('stroke', C.green).attr('fill', 'none').attr('stroke-width', 2)
+                            .attr('marker-end', 'url(#arrow-frag)')
+                            .attr('opacity', 0).transition().duration(400).attr('opacity', 0.7);
+
+                        const oG = svg.append('g').attr('transform', `translate(${oX}, ${oY})`);
+                        oG.append('rect').attr('width', 260).attr('height', 180)
+                            .attr('fill', C.surface0).attr('stroke', C.green).attr('stroke-width', 2).attr('rx', 8)
+                            .attr('opacity', 0).transition().duration(500).attr('opacity', 1);
+                        oG.append('text').attr('x', 12).attr('y', 22).attr('fill', C.green)
+                            .attr('font-weight', 600).attr('font-family', 'Inter').attr('font-size', 13)
+                            .text('sdk.yml (output)');
+                        const oItems = ['git: no-OS (v2.1.0)', 'git: linux (v6.6)', 'git: zephyr (v3.7)', 'tc: arm-gcc (v14.3)', 'build: make sdk-build'];
+                        oItems.forEach((t, i) => {
+                            oG.append('text').attr('x', 16).attr('y', 48 + i * 26)
+                                .attr('font-family', 'JetBrains Mono').attr('font-size', 11)
+                                .attr('fill', C.green)
+                                .attr('opacity', 0)
+                                .transition().delay(i * 100).duration(300).attr('opacity', 1)
+                                .text(t);
+                        });
+                    }
+                }
+            }
+        }
+
+        let currentStep = -1;
+
+        function goToStep(step) {
+            animState.running = false;
+            clearTimeout(animState.timer);
+            currentStep = Math.max(-1, Math.min(step, stepLabels.length - 1));
+            if (currentStep >= 0) {
+                activateStep(stepsId, currentStep, stepLabels.length);
+            } else {
+                createSteps(stepsId, stepLabels);
+            }
+            draw(currentStep);
+        }
+
+        draw(-1);
+
+        document.getElementById('merge-fragment-play').addEventListener('click', () => {
+            if (animState.running) return;
+            animState.running = true;
+            currentStep = 0;
+            function next() {
+                activateStep(stepsId, currentStep, stepLabels.length);
+                draw(currentStep);
+                currentStep++;
+                if (currentStep <= 4) {
+                    animState.timer = setTimeout(next, 1400);
+                } else {
+                    currentStep = 4;
+                    animState.running = false;
+                }
+            }
+            next();
+        });
+
+        document.getElementById('merge-fragment-prev').addEventListener('click', () => {
+            goToStep(currentStep - 1);
+        });
+
+        document.getElementById('merge-fragment-next').addEventListener('click', () => {
+            goToStep(currentStep + 1);
+        });
+
+        document.getElementById('merge-fragment-reset').addEventListener('click', () => {
+            goToStep(-1);
+        });
+    })();
+
+    // =========================================================================
+    // Section 3: Fragment apply
+    // =========================================================================
+    (function() {
+        const containerId = 'viz-fragment-apply';
+        const stepsId = 'fragment-apply-steps';
+        const stepLabels = ['Base config', 'Remove items', 'Add/Modify items', 'Replace scalars', 'Final config'];
+        createSteps(stepsId, stepLabels);
+
+        const width = 1100, height = 500;
+        const svg = d3.select(`#${containerId}`).append('svg')
+            .attr('viewBox', `0 0 ${width} ${height}`)
+            .attr('width', '100%')
+            .attr('height', height);
+
+        svg.append('defs').append('marker')
+            .attr('id', 'arrow-apply')
+            .attr('viewBox', '0 0 10 10')
+            .attr('refX', 10).attr('refY', 5)
+            .attr('markerWidth', 6).attr('markerHeight', 6)
+            .attr('orient', 'auto')
+            .append('path').attr('d', 'M0,0 L10,5 L0,10 Z').attr('fill', C.overlay0);
+
+        let animState = { running: false, timer: null };
+
+        const baseItems = [
+            { key: 'git: no-OS', value: 'commit: main', status: 'normal' },
+            { key: 'git: linux', value: 'commit: v6.6', status: 'normal' },
+            { key: 'git: legacy-hal', value: 'commit: v1.0', status: 'normal' },
+            { key: 'tc: arm-gcc', value: 'v13.3', status: 'normal' },
+            { key: 'var: PLATFORM', value: 'adin1110', status: 'normal' },
+            { key: 'mirror', value: '$HOME/tmp/mirror', status: 'normal' },
+            { key: 'build', value: 'make all', status: 'normal' },
+        ];
+
+        const fragmentOps = [
+            { op: 'remove', key: 'git: legacy-hal', note: 'remove_gits: legacy-hal' },
+            { op: 'modify', key: 'git: no-OS', value: 'commit: v2.1.0', note: 'override commit' },
+            { op: 'add', key: 'git: zephyr', value: 'commit: v3.7', note: 'new git' },
+            { op: 'modify', key: 'tc: arm-gcc', value: 'v14.3', note: 'override version' },
+            { op: 'replace', key: 'mirror', value: '/opt/mirror', note: 'scalar replace' },
+            { op: 'replace', key: 'build', value: 'west build', note: 'global target replace' },
+        ];
+
+        function getItemsAtStep(step) {
+            let items = baseItems.map(i => ({ ...i }));
+            if (step >= 1) {
+                // Remove
+                items = items.map(i => {
+                    if (i.key === 'git: legacy-hal') return { ...i, status: 'removed' };
+                    return i;
+                });
+            }
+            if (step >= 2) {
+                // Remove the removed one, modify, add
+                items = items.filter(i => i.status !== 'removed');
+                items = items.map(i => {
+                    if (i.key === 'git: no-OS') return { ...i, value: 'commit: v2.1.0', status: 'modified' };
+                    if (i.key === 'tc: arm-gcc') return { ...i, value: 'v14.3', status: 'modified' };
+                    return i;
+                });
+                items.push({ key: 'git: zephyr', value: 'commit: v3.7', status: 'added' });
+            }
+            if (step >= 3) {
+                items = items.map(i => {
+                    if (i.key === 'mirror') return { ...i, value: '/opt/mirror', status: 'modified' };
+                    if (i.key === 'build') return { ...i, value: 'west build', status: 'modified' };
+                    return i;
+                });
+            }
+            if (step >= 4) {
+                items = items.map(i => ({ ...i, status: i.status === 'normal' ? 'final' : i.status === 'modified' ? 'final-modified' : 'final-added' }));
+            }
+            return items;
+        }
+
+        function statusColor(status) {
+            switch (status) {
+                case 'removed': return C.red;
+                case 'modified': return C.teal;
+                case 'added': return C.teal;
+                case 'final': return C.green;
+                case 'final-modified': return C.teal;
+                case 'final-added': return C.teal;
+                default: return C.surface1;
+            }
+        }
+
+        function draw(step) {
+            svg.selectAll('*:not(defs)').remove();
+
+            // Base config box
+            const bx = 40, by = 30;
+            const items = step < 0 ? baseItems : getItemsAtStep(step);
+            const boxH = 50 + items.length * 34;
+
+            const bG = svg.append('g').attr('transform', `translate(${bx}, ${by})`);
+            bG.append('rect').attr('width', 340).attr('height', boxH)
+                .attr('fill', C.surface0)
+                .attr('stroke', step >= 4 ? C.green : C.blue)
+                .attr('stroke-width', 2).attr('rx', 8);
+            bG.append('text').attr('x', 14).attr('y', 24)
+                .attr('fill', step >= 4 ? C.green : C.blue)
+                .attr('font-weight', 600).attr('font-family', 'Inter').attr('font-size', 14)
+                .text(step >= 4 ? 'Final Config' : 'Base Config (sdk.yml)');
+
+            items.forEach((item, i) => {
+                const color = statusColor(item.status);
+                const ig = bG.append('g').attr('transform', `translate(14, ${42 + i * 34})`);
+
+                ig.append('rect').attr('width', 312).attr('height', 28)
+                    .attr('fill', item.status === 'removed' ? 'rgba(243,139,168,0.1)' : C.mantle)
+                    .attr('rx', 4).attr('stroke', color).attr('stroke-width', 1.5);
+
+                if (item.status === 'removed') {
+                    ig.append('line').attr('x1', 0).attr('y1', 14).attr('x2', 312).attr('y2', 14)
+                        .attr('stroke', C.red).attr('stroke-width', 1.5).attr('opacity', 0.6);
+                }
+
+                ig.append('text').attr('x', 10).attr('y', 18)
+                    .attr('font-family', 'JetBrains Mono').attr('font-size', 11)
+                    .attr('fill', item.status === 'removed' ? C.red : C.text)
+                    .attr('text-decoration', item.status === 'removed' ? 'line-through' : 'none')
+                    .text(item.key);
+
+                ig.append('text').attr('x', 170).attr('y', 18)
+                    .attr('font-family', 'JetBrains Mono').attr('font-size', 10)
+                    .attr('fill', color)
+                    .text(item.value);
+            });
+
+            // Fragment operations (right side)
+            if (step >= 0 && step < 4) {
+                const fx = 500, fy = 30;
+                const fG = svg.append('g').attr('transform', `translate(${fx}, ${fy})`);
+                fG.append('rect').attr('width', 380).attr('height', 50 + fragmentOps.length * 34)
+                    .attr('fill', C.surface0).attr('stroke', C.peach)
+                    .attr('stroke-width', 2).attr('rx', 8)
+                    .attr('stroke-dasharray', '6 3');
+                fG.append('text').attr('x', 14).attr('y', 24)
+                    .attr('fill', C.peach).attr('font-weight', 600)
+                    .attr('font-family', 'Inter').attr('font-size', 14)
+                    .text('Fragment Operations');
+
+                fragmentOps.forEach((op, i) => {
+                    const active = (step === 1 && op.op === 'remove') ||
+                                   (step === 2 && (op.op === 'modify' || op.op === 'add')) ||
+                                   (step === 3 && op.op === 'replace');
+
+                    const og = fG.append('g').attr('transform', `translate(14, ${42 + i * 34})`);
+                    const opColor = op.op === 'remove' ? C.red : op.op === 'add' ? C.green : C.teal;
+
+                    og.append('rect').attr('width', 352).attr('height', 28)
+                        .attr('fill', active ? `${opColor}22` : C.mantle)
+                        .attr('rx', 4)
+                        .attr('stroke', active ? opColor : C.surface1)
+                        .attr('stroke-width', active ? 2 : 1);
+
+                    og.append('text').attr('x', 10).attr('y', 18)
+                        .attr('font-family', 'JetBrains Mono').attr('font-size', 11)
+                        .attr('fill', active ? opColor : C.subtext0)
+                        .attr('font-weight', active ? 600 : 400)
+                        .text(`${op.op}: ${op.key}`);
+
+                    og.append('text').attr('x', 240).attr('y', 18)
+                        .attr('font-family', 'JetBrains Mono').attr('font-size', 9)
+                        .attr('fill', C.subtext0)
+                        .text(op.note);
+
+                    // Animated arrow from active ops to base
+                    if (active) {
+                        const startX = fx;
+                        const startY = fy + 42 + i * 34 + 14;
+                        const endX = bx + 340;
+                        const endY = by + boxH / 2;
+
+                        svg.append('path')
+                            .attr('d', `M${startX},${startY} C${startX - 40},${startY} ${endX + 40},${endY} ${endX},${endY}`)
+                            .attr('stroke', opColor).attr('fill', 'none').attr('stroke-width', 2)
+                            .attr('class', 'link animated')
+                            .attr('marker-end', 'url(#arrow-apply)')
+                            .attr('opacity', 0)
+                            .transition().duration(400).attr('opacity', 0.7);
+                    }
+                });
+            }
+
+            // Step label
+            if (step >= 0 && step < stepLabels.length) {
+                svg.append('text')
+                    .attr('x', width / 2).attr('y', height - 20)
+                    .attr('text-anchor', 'middle')
+                    .attr('font-family', 'Inter').attr('font-size', 14).attr('fill', C.subtext0)
+                    .text(`Step ${step + 1}: ${stepLabels[step]}`);
+            }
+        }
+
+        let currentStep = -1;
+
+        function goToStep(step) {
+            animState.running = false;
+            clearTimeout(animState.timer);
+            currentStep = Math.max(-1, Math.min(step, stepLabels.length - 1));
+            if (currentStep >= 0) {
+                activateStep(stepsId, currentStep, stepLabels.length);
+            } else {
+                createSteps(stepsId, stepLabels);
+            }
+            draw(currentStep);
+        }
+
+        draw(-1);
+
+        document.getElementById('fragment-apply-play').addEventListener('click', () => {
+            if (animState.running) return;
+            animState.running = true;
+            currentStep = 0;
+            function next() {
+                activateStep(stepsId, currentStep, stepLabels.length);
+                draw(currentStep);
+                currentStep++;
+                if (currentStep <= 4) {
+                    animState.timer = setTimeout(next, 1400);
+                } else {
+                    currentStep = 4;
+                    animState.running = false;
+                }
+            }
+            next();
+        });
+
+        document.getElementById('fragment-apply-prev').addEventListener('click', () => {
+            goToStep(currentStep - 1);
+        });
+
+        document.getElementById('fragment-apply-next').addEventListener('click', () => {
+            goToStep(currentStep + 1);
+        });
+
+        document.getElementById('fragment-apply-reset').addEventListener('click', () => {
+            goToStep(-1);
+        });
+    })();
+    </script>
+</body>
+</html>
