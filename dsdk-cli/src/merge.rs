@@ -115,61 +115,46 @@ pub fn merge_targets(
     };
 
     // --- Gits ---
-    let mut git_owners: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, cfg) in targets {
-        for git in &cfg.gits {
-            git_owners
-                .entry(git.name.clone())
-                .or_default()
-                .push(name.to_string());
-        }
-    }
+    // Track first occurrence of each git by name
+    let mut git_first: HashMap<String, (&str, &crate::config::GitConfig)> = HashMap::new();
     let mut merged_gits = Vec::new();
     for (name, cfg) in targets {
         for git in &cfg.gits {
-            let owners = &git_owners[&git.name];
-            if owners.len() > 1 {
-                // Only report conflict once (from the first target that defines it)
-                if owners[0] == *name {
+            if let Some((first_target, first_git)) = git_first.get(&git.name) {
+                if git != *first_git {
+                    // Different configuration — conflict
                     conflicts.push(MergeConflict {
                         section: "gits".to_string(),
                         key: git.name.clone(),
-                        sources: owners.clone(),
+                        sources: vec![first_target.to_string(), name.to_string()],
                     });
                 }
+                // Identical — silently deduplicate
             } else {
+                git_first.insert(git.name.clone(), (name, git));
                 merged_gits.push(git.clone());
             }
         }
     }
 
     // --- Toolchains ---
-    let mut tc_owners: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, cfg) in targets {
-        if let Some(ref tcs) = cfg.toolchains {
-            for tc in tcs {
-                tc_owners
-                    .entry(tc.get_name())
-                    .or_default()
-                    .push(name.to_string());
-            }
-        }
-    }
+    let mut tc_first: HashMap<String, (&str, &ToolchainConfig)> = HashMap::new();
     let mut merged_toolchains: Vec<ToolchainConfig> = Vec::new();
     for (name, cfg) in targets {
         if let Some(ref tcs) = cfg.toolchains {
             for tc in tcs {
                 let tc_name = tc.get_name();
-                let owners = &tc_owners[&tc_name];
-                if owners.len() > 1 {
-                    if owners[0] == *name {
+                if let Some((first_target, first_tc)) = tc_first.get(&tc_name) {
+                    if tc != *first_tc {
                         conflicts.push(MergeConflict {
                             section: "toolchains".to_string(),
                             key: tc_name,
-                            sources: owners.clone(),
+                            sources: vec![first_target.to_string(), name.to_string()],
                         });
                     }
+                    // Identical — silently deduplicate
                 } else {
+                    tc_first.insert(tc_name, (name, tc));
                     merged_toolchains.push(tc.clone());
                 }
             }
@@ -200,31 +185,21 @@ pub fn merge_targets(
     }
 
     // --- Copy files ---
-    let mut cf_owners: HashMap<String, Vec<String>> = HashMap::new(); // dest -> targets
-    for (name, cfg) in targets {
-        if let Some(ref cfs) = cfg.copy_files {
-            for cf in cfs {
-                cf_owners
-                    .entry(cf.dest.clone())
-                    .or_default()
-                    .push(name.to_string());
-            }
-        }
-    }
+    let mut cf_first: HashMap<String, (&str, &crate::config::CopyFileConfig)> = HashMap::new();
     let mut merged_copy_files = Vec::new();
     for (name, cfg) in targets {
         if let Some(ref cfs) = cfg.copy_files {
             for cf in cfs {
-                let owners = &cf_owners[&cf.dest];
-                if owners.len() > 1 {
-                    if owners[0] == *name {
+                if let Some((first_target, first_cf)) = cf_first.get(&cf.dest) {
+                    if cf != *first_cf {
                         conflicts.push(MergeConflict {
                             section: "copy_files".to_string(),
                             key: cf.dest.clone(),
-                            sources: owners.clone(),
+                            sources: vec![first_target.to_string(), name.to_string()],
                         });
                     }
                 } else {
+                    cf_first.insert(cf.dest.clone(), (name, cf));
                     merged_copy_files.push(cf.clone());
                 }
             }
@@ -232,31 +207,21 @@ pub fn merge_targets(
     }
 
     // --- Install ---
-    let mut install_owners: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, cfg) in targets {
-        if let Some(ref installs) = cfg.install {
-            for inst in installs {
-                install_owners
-                    .entry(inst.name.clone())
-                    .or_default()
-                    .push(name.to_string());
-            }
-        }
-    }
+    let mut install_first: HashMap<String, (&str, &crate::config::InstallConfig)> = HashMap::new();
     let mut merged_install = Vec::new();
     for (name, cfg) in targets {
         if let Some(ref installs) = cfg.install {
             for inst in installs {
-                let owners = &install_owners[&inst.name];
-                if owners.len() > 1 {
-                    if owners[0] == *name {
+                if let Some((first_target, first_inst)) = install_first.get(&inst.name) {
+                    if inst != *first_inst {
                         conflicts.push(MergeConflict {
                             section: "install".to_string(),
                             key: inst.name.clone(),
-                            sources: owners.clone(),
+                            sources: vec![first_target.to_string(), name.to_string()],
                         });
                     }
                 } else {
+                    install_first.insert(inst.name.clone(), (name, inst));
                     merged_install.push(inst.clone());
                 }
             }
@@ -376,7 +341,11 @@ const DIVIDER: &str =
 ///
 /// Produces output that matches the hand-written style of existing sdk.yml
 /// files: section headers, blank lines between sections, and no `null` values.
-pub fn format_merged_yaml(config: &SdkConfig, target_names: &[&str]) -> String {
+pub fn format_merged_yaml(
+    config: &SdkConfig,
+    target_names: &[&str],
+    source_configs: &[(&str, &SdkConfig)],
+) -> String {
     let mut out = String::new();
 
     // Header comment
@@ -400,7 +369,7 @@ pub fn format_merged_yaml(config: &SdkConfig, target_names: &[&str]) -> String {
             // Sort for deterministic output
             let sorted: BTreeMap<_, _> = vars.iter().collect();
             for (key, value) in &sorted {
-                out.push_str(&format!("  {}: {}\n", key, value));
+                out.push_str(&format!("  {}: {}\n", key, yaml_quote(value)));
             }
         }
     }
@@ -511,11 +480,10 @@ pub fn format_merged_yaml(config: &SdkConfig, target_names: &[&str]) -> String {
     }
 
     // --- Global targets ---
-    emit_optional_sdk_target(&mut out, "envsetup", &config.envsetup);
-    emit_optional_sdk_target(&mut out, "build", &config.build);
-    emit_optional_sdk_target(&mut out, "test", &config.test);
-    emit_optional_sdk_target(&mut out, "clean", &config.clean);
-    emit_optional_sdk_target(&mut out, "flash", &config.flash);
+    // Emit active targets (e.g. applied by fragment), then commented-out
+    // suggestions from source targets for those still undefined.
+    emit_active_global_targets(&mut out, config);
+    emit_commented_global_targets(&mut out, config, source_configs);
 
     // --- Gits ---
     if !config.gits.is_empty() {
@@ -598,6 +566,41 @@ fn emit_toolchain(out: &mut String, tc: &ToolchainConfig) {
     out.push('\n');
 }
 
+/// Returns the value quoted if it contains characters that are problematic
+/// in plain YAML scalars (e.g. starts with `@`, `` ` ``, `{`, `}`, `*`, `&`,
+/// `!`, `%`, `#`, `|`, `>`, `'`, `"`, or contains `: `, ` #`).
+fn yaml_quote(s: &str) -> String {
+    let needs_quoting = s.starts_with(|c: char| {
+        matches!(
+            c,
+            '@' | '`'
+                | '{'
+                | '}'
+                | '*'
+                | '&'
+                | '!'
+                | '%'
+                | '#'
+                | '|'
+                | '>'
+                | '\''
+                | '"'
+                | '['
+                | ']'
+                | ','
+                | '?'
+        )
+    }) || s.contains(": ")
+        || s.contains(" #");
+
+    if needs_quoting {
+        // Use double quotes, escaping any internal double quotes
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
+}
+
 fn emit_string_or_vec(out: &mut String, key: &str, values: &[String], indent: usize) {
     let prefix = " ".repeat(indent);
     if values.len() == 1 && values[0].contains('\n') {
@@ -609,36 +612,182 @@ fn emit_string_or_vec(out: &mut String, key: &str, values: &[String], indent: us
     } else {
         out.push_str(&format!("{}{}:\n", prefix, key));
         for v in values {
-            out.push_str(&format!("{}  - {}\n", prefix, v));
+            out.push_str(&format!("{}  - {}\n", prefix, yaml_quote(v)));
         }
     }
 }
 
-fn emit_optional_sdk_target(
-    out: &mut String,
-    name: &str,
-    target: &Option<crate::config::SdkTarget>,
-) {
+/// Emit global targets that are actively defined in the merged config
+/// (e.g. applied via a fragment).
+fn emit_active_global_targets(out: &mut String, config: &SdkConfig) {
     use crate::config::SdkTarget;
-    let Some(t) = target else { return };
+
+    let targets: &[(&str, &Option<SdkTarget>)] = &[
+        ("envsetup", &config.envsetup),
+        ("build", &config.build),
+        ("test", &config.test),
+        ("clean", &config.clean),
+        ("flash", &config.flash),
+    ];
+
+    let any_active = targets.iter().any(|(_, t)| t.is_some());
+    if !any_active {
+        return;
+    }
 
     out.push('\n');
-    match t {
-        SdkTarget::Commands(cmds) => {
-            emit_string_or_vec(out, name, cmds, 0);
+    emit_section_header(out, "Global targets");
+
+    for (name, target) in targets {
+        let Some(t) = target else { continue };
+        match t {
+            SdkTarget::Commands(cmds) => {
+                emit_string_or_vec(out, name, cmds, 0);
+            }
+            SdkTarget::CommandsWithDeps {
+                commands,
+                depends_on,
+            } => {
+                out.push_str(&format!("{}:\n", name));
+                if let Some(ref deps) = depends_on {
+                    out.push_str("  depends_on:\n");
+                    for d in deps {
+                        out.push_str(&format!("    - {}\n", d));
+                    }
+                }
+                emit_string_or_vec(out, "commands", commands, 2);
+            }
         }
-        SdkTarget::CommandsWithDeps {
-            commands,
-            depends_on,
-        } => {
-            out.push_str(&format!("{}:\n", name));
-            if let Some(ref deps) = depends_on {
-                out.push_str("  depends_on:\n");
-                for d in deps {
-                    out.push_str(&format!("    - {}\n", d));
+        out.push('\n');
+    }
+}
+
+/// Emit global targets as commented-out YAML, grouped by target name.
+/// Only emits commented suggestions for targets that are NOT already defined
+/// in the merged config (i.e. those not provided by a fragment).
+fn emit_commented_global_targets(
+    out: &mut String,
+    config: &SdkConfig,
+    source_configs: &[(&str, &SdkConfig)],
+) {
+    use crate::config::SdkTarget;
+
+    let global_target_names = ["envsetup", "build", "test", "clean", "flash"];
+
+    // Only emit commented versions for targets still undefined in merged config
+    let undefined_targets: Vec<&&str> = global_target_names
+        .iter()
+        .filter(|gt| {
+            let merged = match **gt {
+                "build" => &config.build,
+                "test" => &config.test,
+                "clean" => &config.clean,
+                "flash" => &config.flash,
+                "envsetup" => &config.envsetup,
+                _ => &None,
+            };
+            merged.is_none()
+        })
+        .collect();
+
+    // Check if any source defines any of the still-undefined targets
+    let any_defined = undefined_targets.iter().any(|gt| {
+        source_configs.iter().any(|(_, cfg)| {
+            let target = match **gt {
+                "build" => &cfg.build,
+                "test" => &cfg.test,
+                "clean" => &cfg.clean,
+                "flash" => &cfg.flash,
+                "envsetup" => &cfg.envsetup,
+                _ => &None,
+            };
+            target.is_some()
+        })
+    });
+
+    if !any_defined {
+        return;
+    }
+
+    out.push('\n');
+    emit_section_header(out, "Global targets (commented out — uncomment as needed)");
+
+    for gt_name in &undefined_targets {
+        let sources: Vec<(&str, &SdkTarget)> = source_configs
+            .iter()
+            .filter_map(|(name, cfg)| {
+                let target = match **gt_name {
+                    "build" => &cfg.build,
+                    "test" => &cfg.test,
+                    "clean" => &cfg.clean,
+                    "flash" => &cfg.flash,
+                    "envsetup" => &cfg.envsetup,
+                    _ => &None,
+                };
+                target.as_ref().map(|t| (*name, t))
+            })
+            .collect();
+
+        if sources.is_empty() {
+            continue;
+        }
+
+        for (target_name, sdk_target) in &sources {
+            out.push_str(&format!("# from {}\n", target_name));
+            match sdk_target {
+                SdkTarget::Commands(cmds) => {
+                    emit_commented_commands(out, gt_name, cmds, None);
+                }
+                SdkTarget::CommandsWithDeps {
+                    commands,
+                    depends_on,
+                } => {
+                    emit_commented_commands(out, gt_name, commands, depends_on.as_ref());
                 }
             }
-            emit_string_or_vec(out, "commands", commands, 2);
+        }
+        out.push('\n');
+    }
+}
+
+/// Emit a single global target's commands as commented-out YAML.
+/// Handles both list form and block scalar (single multi-line string).
+fn emit_commented_commands(
+    out: &mut String,
+    target_name: &str,
+    commands: &[String],
+    depends_on: Option<&Vec<String>>,
+) {
+    let is_block_scalar = commands.len() == 1 && commands[0].contains('\n');
+    let has_deps = depends_on.is_some_and(|d| !d.is_empty());
+
+    if has_deps || is_block_scalar {
+        // Structured form with commands: key
+        out.push_str(&format!("# {}:\n", target_name));
+        if let Some(deps) = depends_on {
+            if !deps.is_empty() {
+                out.push_str("#   depends_on:\n");
+                for d in deps {
+                    out.push_str(&format!("#     - {}\n", d));
+                }
+            }
+        }
+        if is_block_scalar {
+            out.push_str("#   commands: |\n");
+            for line in commands[0].lines() {
+                out.push_str(&format!("#     {}\n", line));
+            }
+        } else {
+            out.push_str("#   commands:\n");
+            for cmd in commands {
+                out.push_str(&format!("#     - {}\n", yaml_quote(cmd)));
+            }
+        }
+    } else {
+        // Simple list form
+        out.push_str(&format!("# {}:\n", target_name));
+        for cmd in commands {
+            out.push_str(&format!("#   - {}\n", yaml_quote(cmd)));
         }
     }
 }
@@ -841,9 +990,24 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_conflicting_gits() {
+    fn test_merge_identical_gits_no_conflict() {
         let cfg_a = make_config("shared-repo");
         let cfg_b = make_config("shared-repo");
+
+        let result = merge_targets(&[("target-a", &cfg_a), ("target-b", &cfg_b)], None);
+
+        // Identical entries should silently deduplicate
+        assert!(result.conflicts.is_empty());
+        assert_eq!(result.config.gits.len(), 1);
+        assert_eq!(result.config.gits[0].name, "shared-repo");
+    }
+
+    #[test]
+    fn test_merge_conflicting_gits() {
+        let cfg_a = make_config("shared-repo");
+        // Make the git different in cfg_b
+        let mut cfg_b = make_config("shared-repo");
+        cfg_b.gits[0].url = "https://example.com/shared-repo-fork.git".to_string();
 
         let result = merge_targets(&[("target-a", &cfg_a), ("target-b", &cfg_b)], None);
 
@@ -851,8 +1015,12 @@ mod tests {
         assert_eq!(result.conflicts[0].section, "gits");
         assert_eq!(result.conflicts[0].key, "shared-repo");
         assert_eq!(result.conflicts[0].sources, vec!["target-a", "target-b"]);
-        // Conflicting gits are excluded from the merged config
-        assert!(result.config.gits.is_empty());
+        // First target's entry is kept in merged output
+        assert_eq!(result.config.gits.len(), 1);
+        assert_eq!(
+            result.config.gits[0].url,
+            "https://example.com/shared-repo.git"
+        );
     }
 
     #[test]
@@ -1183,6 +1351,7 @@ mod tests {
     #[test]
     fn test_merge_mixed_conflicts_and_successes() {
         let mut cfg_a = make_config("shared-repo");
+        cfg_a.gits[0].url = "https://example.com/shared-repo-v1.git".to_string();
         cfg_a.gits.push(GitConfig {
             name: "unique-a".to_string(),
             url: "https://example.com/unique-a.git".to_string(),
@@ -1198,6 +1367,7 @@ mod tests {
         ]));
 
         let mut cfg_b = make_config("shared-repo");
+        cfg_b.gits[0].url = "https://example.com/shared-repo-v2.git".to_string();
         cfg_b.gits.push(GitConfig {
             name: "unique-b".to_string(),
             url: "https://example.com/unique-b.git".to_string(),
@@ -1214,11 +1384,12 @@ mod tests {
 
         let result = merge_targets(&[("target-a", &cfg_a), ("target-b", &cfg_b)], None);
 
-        // Should have 2 conflicts: shared-repo git + SHARED_VAR variable
+        // Should have 2 conflicts: shared-repo git (different URLs) + SHARED_VAR variable
         assert_eq!(result.conflicts.len(), 2);
 
         // Non-conflicting items should still be merged
-        assert_eq!(result.config.gits.len(), 2); // unique-a + unique-b
+        // shared-repo from first target + unique-a + unique-b = 3
+        assert_eq!(result.config.gits.len(), 3);
         assert!(result.config.gits.iter().any(|g| g.name == "unique-a"));
         assert!(result.config.gits.iter().any(|g| g.name == "unique-b"));
 
@@ -1230,7 +1401,7 @@ mod tests {
     #[test]
     fn test_format_merged_yaml_no_nulls() {
         let cfg = make_config("repo-a");
-        let yaml = format_merged_yaml(&cfg, &["target-a"]);
+        let yaml = format_merged_yaml(&cfg, &["target-a"], &[]);
 
         assert!(
             !yaml.contains("null"),
@@ -1258,7 +1429,7 @@ mod tests {
         }]);
         cfg.variables = Some(HashMap::from([("VAR_A".to_string(), "val_a".to_string())]));
 
-        let yaml = format_merged_yaml(&cfg, &["target-a", "target-b"]);
+        let yaml = format_merged_yaml(&cfg, &["target-a", "target-b"], &[]);
 
         assert!(yaml.contains("# Toolchain configurations"));
         assert!(yaml.contains("# Manifest variables"));

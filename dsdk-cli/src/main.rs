@@ -340,7 +340,11 @@ fn handle_merge_command(
 
     // Format the merged sdk.yml using the clean YAML emitter
     let target_names: Vec<&str> = configs.iter().map(|(n, _, _)| n.as_str()).collect();
-    let merged_yaml = format_merged_yaml(&result.config, &target_names);
+    let source_configs: Vec<(&str, &SdkConfig)> = configs
+        .iter()
+        .map(|(n, cfg, _)| (n.as_str(), cfg))
+        .collect();
+    let merged_yaml = format_merged_yaml(&result.config, &target_names, &source_configs);
 
     // Load and merge os-dependencies.yml files
     let mut os_deps_list = Vec::new();

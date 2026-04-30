@@ -274,7 +274,7 @@ pub trait SdkConfigCore {
     fn variables(&self) -> &Option<HashMap<String, String>>;
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct GitConfig {
     pub name: String,
     pub url: String,
@@ -299,7 +299,7 @@ pub struct GitConfig {
 /// Configuration for installing a component/tool in the workspace.
 /// These are typically used for extracting downloaded archives and setting up
 /// tools that don't require git repository management.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct InstallConfig {
     /// Name of the installation target (e.g., "ninja", "zephyr-sdk")
     pub name: String,
@@ -316,7 +316,7 @@ pub struct InstallConfig {
     pub commands: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ToolchainConfig {
     /// Optional name for the toolchain file. If not specified, derived from URL
     #[serde(default)]
@@ -400,7 +400,7 @@ impl ToolchainConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct CopyFileConfig {
     pub source: String,
     pub dest: String,

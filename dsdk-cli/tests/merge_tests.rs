@@ -357,7 +357,7 @@ fn test_merge_format_yaml_roundtrip() {
     assert!(result.conflicts.is_empty());
 
     // Write using formatter, then re-parse
-    let yaml = format_merged_yaml(&result.config, &["target-a", "target-b"]);
+    let yaml = format_merged_yaml(&result.config, &["target-a", "target-b"], &[]);
     let output_dir = fixture.create_dir("output");
     std::fs::write(output_dir.join("sdk.yml"), &yaml).unwrap();
     let reloaded = load_config(output_dir.join("sdk.yml")).unwrap();
