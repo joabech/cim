@@ -1043,10 +1043,7 @@ pub(crate) fn handle_init_command(config: InitConfig) {
         if let Some(direnv_cfg) = sdk_config.direnv() {
             if direnv_cfg.used {
                 if let Err(e) = setup_direnv(&workspace_path, direnv_cfg) {
-                    messages::info(&format!(
-                        "Note: direnv setup encountered an issue: {}",
-                        e
-                    ));
+                    messages::info(&format!("Note: direnv setup encountered an issue: {}", e));
                 }
             }
         }

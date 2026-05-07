@@ -683,9 +683,17 @@ impl SdkConfigCore for SdkConfig {
 ///
 /// Re-parses the YAML as a raw `Value` and checks known sections for unrecognized fields,
 /// falling back to the original error when no specific cause can be identified.
-fn enhance_config_error(yaml_content: &str, path: &Path, original_error: &serde_yaml::Error) -> String {
+fn enhance_config_error(
+    yaml_content: &str,
+    path: &Path,
+    original_error: &serde_yaml::Error,
+) -> String {
     let Ok(raw) = serde_yaml::from_str::<serde_yaml::Value>(yaml_content) else {
-        return format!("Config validation error in {}: {}", path.display(), original_error);
+        return format!(
+            "Config validation error in {}: {}",
+            path.display(),
+            original_error
+        );
     };
 
     let sections = ["build", "envsetup", "test", "clean", "flash"];
@@ -712,7 +720,11 @@ fn enhance_config_error(yaml_content: &str, path: &Path, original_error: &serde_
         }
     }
 
-    format!("Config validation error in {}: {}", path.display(), original_error)
+    format!(
+        "Config validation error in {}: {}",
+        path.display(),
+        original_error
+    )
 }
 
 /// Load SDK configuration from a YAML file with include support.
@@ -1630,7 +1642,10 @@ build:
         file.write_all(yaml.as_bytes()).unwrap();
 
         let config = load_config(&file_path).unwrap();
-        let build = config.build.as_ref().expect("build section should be present");
+        let build = config
+            .build
+            .as_ref()
+            .expect("build section should be present");
         assert_eq!(build.commands(), &[] as &[String]);
         let expected: Vec<String> = vec![
             "zephyrproject/zephyr".to_string(),
