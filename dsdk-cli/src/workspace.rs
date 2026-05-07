@@ -867,13 +867,26 @@ pub fn load_config_with_user_overrides(
 /// Expand `${{ VAR }}` manifest variables in all relevant fields of an SdkConfig.
 ///
 /// Expands variables in git URLs, toolchain URLs/destinations/names, and
-/// copy_files source/dest fields. Only operates when the config has a
-/// `variables` section defined.
+/// copy_files source/dest fields. The expansion context includes both
+/// user-defined variables from the `variables:` section and auto-generated
+/// `_DIR` variables derived from git entry names.
 pub fn expand_manifest_vars_in_config(sdk_config: &mut config::SdkConfig) {
-    let Some(raw_vars) = sdk_config.variables.clone() else {
-        return;
+    let mut vars = if let Some(ref raw_vars) = sdk_config.variables {
+        resolve_variables(raw_vars)
+    } else {
+        std::collections::HashMap::new()
     };
-    let vars = resolve_variables(&raw_vars);
+
+    // Merge auto-generated DIR vars (user-defined take precedence)
+    if let Ok(dir_vars) = generate_git_dir_vars(&sdk_config.gits, sdk_config.variables.as_ref()) {
+        for (k, v) in dir_vars {
+            vars.entry(k).or_insert(v);
+        }
+    }
+
+    if vars.is_empty() {
+        return;
+    }
 
     for git in &mut sdk_config.gits {
         git.url = expand_manifest_vars(&git.url, &vars);
