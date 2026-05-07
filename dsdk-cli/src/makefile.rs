@@ -179,8 +179,8 @@ fn makefile_contains_target(content: &str, target_name: &str) -> bool {
 /// Discover per-repo phase targets inside overlay makefiles.
 ///
 /// For each git that has a `build/<name>.mk` (or equivalent) fragment,
-/// scan the file for targets named `<name>-build`, `<name>-clean`,
-/// `<name>-test`, `<name>-flash`, and `<name>-envsetup`.
+/// scan the file for targets named `<name>-<phase>` for every phase in
+/// the provided `phases` list.
 ///
 /// Returns a map from phase name to the list of discovered target names.
 fn discover_overlay_phase_targets(
@@ -188,6 +188,7 @@ fn discover_overlay_phase_targets(
     gits: &[config::GitConfig],
     build_folder: Option<&str>,
     exclude: &[String],
+    phases: &[String],
 ) -> std::collections::HashMap<String, Vec<String>> {
     let mut phase_deps: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
@@ -204,11 +205,11 @@ fn discover_overlay_phase_targets(
             Err(_) => continue,
         };
 
-        for phase in &["build", "clean", "test", "flash", "envsetup"] {
+        for phase in phases {
             let target_name = format!("{}-{}", git.name, phase);
             if makefile_contains_target(&content, &target_name) {
                 phase_deps
-                    .entry((*phase).to_string())
+                    .entry(phase.clone())
                     .or_default()
                     .push(target_name);
             }
@@ -309,6 +310,8 @@ pub(crate) fn generate_makefile_content<T: config::SdkConfigCore>(
         makefile.push('\n');
     }
 
+    let phases = sdk_config.phases();
+
     // Discover overlay phase targets (e.g. u-boot-build, linux-clean)
     let phase_deps: std::collections::HashMap<String, Vec<String>> =
         if let Some(ws) = workspace_path {
@@ -317,47 +320,30 @@ pub(crate) fn generate_makefile_content<T: config::SdkConfigCore>(
                 sdk_config.gits(),
                 sdk_config.build_folder().as_deref(),
                 exclude_names,
+                &phases,
             )
         } else {
             std::collections::HashMap::new()
         };
-
-    let envsetup_deps = phase_deps.get("envsetup").map(|v| v.as_slice()).unwrap_or(&[]);
-    let test_deps = phase_deps.get("test").map(|v| v.as_slice()).unwrap_or(&[]);
-    let clean_deps = phase_deps.get("clean").map(|v| v.as_slice()).unwrap_or(&[]);
-    let build_deps = phase_deps.get("build").map(|v| v.as_slice()).unwrap_or(&[]);
-    let flash_deps = phase_deps.get("flash").map(|v| v.as_slice()).unwrap_or(&[]);
 
     if dividers {
         makefile.push_str(&makefile_divider("High-level SDK targets"));
     }
 
     // Add .PHONY declarations
-    let mut phony_targets = vec!["all"];
-
-    // Add sdk-envsetup to PHONY if envsetup commands exist or overlay targets exist
-    if sdk_config.envsetup().is_some() || !envsetup_deps.is_empty() {
-        phony_targets.push("sdk-envsetup");
+    let mut phony_targets = vec!["all".to_string()];
+    for phase in &phases {
+        let deps = phase_deps.get(phase).map(|v| v.as_slice()).unwrap_or(&[]);
+        let has_sdk_target = sdk_config.phase_target(phase).is_some();
+        if has_sdk_target || !deps.is_empty() {
+            phony_targets.push(format!("sdk-{}", phase));
+        }
     }
-
-    // Add sdk-test to PHONY if test commands exist or overlay targets exist
-    if sdk_config.test().is_some() || !test_deps.is_empty() {
-        phony_targets.push("sdk-test");
-    }
-
-    // Add sdk-clean to PHONY (always add it, even if no commands)
-    phony_targets.push("sdk-clean");
-
-    // Add sdk-build to PHONY (always add it, even if no commands)
-    phony_targets.push("sdk-build");
-
-    // Add sdk-flash to PHONY (always add it, even if no commands)
-    phony_targets.push("sdk-flash");
 
     // Add install targets to PHONY if install section exists
     if let Some(install_configs) = sdk_config.install() {
         if !install_configs.is_empty() {
-            phony_targets.push("install-all");
+            phony_targets.push("install-all".to_string());
         }
     }
 
@@ -365,29 +351,25 @@ pub(crate) fn generate_makefile_content<T: config::SdkConfigCore>(
 
     // Add 'all' target that depends on sdk-build and sdk-test
     let mut all_deps = vec!["sdk-build"];
-    if sdk_config.test().is_some() || !test_deps.is_empty() {
+    let test_has_work = sdk_config.phase_target("test").is_some()
+        || !phase_deps.get("test").map(|v| v.is_empty()).unwrap_or(true);
+    if test_has_work {
         all_deps.push("sdk-test");
     }
     makefile.push_str(&format!("all: {}\n\n", all_deps.join(" ")));
 
-    // Add sdk-envsetup target if envsetup commands exist or overlay targets exist
-    if sdk_config.envsetup().is_some() || !envsetup_deps.is_empty() {
-        add_envsetup_target(&mut makefile, sdk_config.envsetup().as_ref(), envsetup_deps);
+    // Add sdk-<phase> targets for every configured phase
+    for phase in &phases {
+        let deps = phase_deps.get(phase).map(|v| v.as_slice()).unwrap_or(&[]);
+        let target = sdk_config.phase_target(phase);
+        let fallback = match phase.as_str() {
+            "build" => Some("No build commands defined in sdk.yml"),
+            "clean" => Some("No clean commands defined in sdk.yml"),
+            "flash" => Some("No flash commands defined in sdk.yml"),
+            _ => None,
+        };
+        add_phase_target(&mut makefile, phase, target, deps, fallback);
     }
-
-    // Add sdk-test target if test commands exist or overlay targets exist
-    if sdk_config.test().is_some() || !test_deps.is_empty() {
-        add_test_target(&mut makefile, sdk_config.test().as_ref(), test_deps);
-    }
-
-    // Add sdk-clean target (always create)
-    add_clean_target(&mut makefile, sdk_config.clean().as_ref(), clean_deps);
-
-    // Add sdk-build target (always create)
-    add_build_target(&mut makefile, sdk_config.build().as_ref(), build_deps);
-
-    // Add sdk-flash target (always create)
-    add_flash_target(&mut makefile, sdk_config.flash().as_ref(), flash_deps);
 
     // Add install-all target if install section exists
     let has_install = match sdk_config.install() {
@@ -487,14 +469,23 @@ pub(crate) fn add_makefile_target(makefile: &mut String, git: &config::GitConfig
     makefile.push('\n');
 }
 
-/// Add the sdk-envsetup target to the Makefile
-pub(crate) fn add_envsetup_target(
+/// Add a generic sdk-<phase> target to the Makefile.
+///
+/// `phase` is the phase name (e.g. "build", "clean", "test").
+/// `phase_target` is the optional SdkTarget from sdk.yml.
+/// `extra_deps` are overlay targets (e.g. "u-boot-build") to add as prerequisites.
+/// `fallback_message` is an optional echo printed when no sdk.yml target exists
+/// and there are no extra deps.
+pub(crate) fn add_phase_target(
     makefile: &mut String,
-    envsetup_target: Option<&config::SdkTarget>,
+    phase: &str,
+    phase_target: Option<&config::SdkTarget>,
     extra_deps: &[String],
+    fallback_message: Option<&str>,
 ) {
+    let target_name = format!("sdk-{}", phase);
     let mut all_deps = Vec::new();
-    if let Some(target) = envsetup_target {
+    if let Some(target) = phase_target {
         if let Some(deps) = target.depends_on() {
             all_deps.extend(deps.iter().cloned());
         }
@@ -502,12 +493,12 @@ pub(crate) fn add_envsetup_target(
     all_deps.extend(extra_deps.iter().cloned());
 
     if all_deps.is_empty() {
-        makefile.push_str("sdk-envsetup:\n");
+        makefile.push_str(&format!("{}:\n", target_name));
     } else {
-        makefile.push_str(&format!("sdk-envsetup: {}\n", all_deps.join(" ")));
+        makefile.push_str(&format!("{}: {}\n", target_name, all_deps.join(" ")));
     }
 
-    if let Some(target) = envsetup_target {
+    if let Some(target) = phase_target {
         for command in target.commands() {
             let rendered = render_command_for_makefile(command);
             let trimmed = rendered.trim();
@@ -532,212 +523,10 @@ pub(crate) fn add_envsetup_target(
             // Add regular command
             makefile.push_str(&format!("\t{}\n", rendered));
         }
-    }
-
-    makefile.push('\n');
-}
-
-/// Add the sdk-test target to the Makefile
-pub(crate) fn add_test_target(
-    makefile: &mut String,
-    test_target: Option<&config::SdkTarget>,
-    extra_deps: &[String],
-) {
-    let mut all_deps = Vec::new();
-    if let Some(target) = test_target {
-        if let Some(deps) = target.depends_on() {
-            all_deps.extend(deps.iter().cloned());
+    } else if let Some(msg) = fallback_message {
+        if extra_deps.is_empty() {
+            makefile.push_str(&format!("\t@echo \"{}\"\n", msg));
         }
-    }
-    all_deps.extend(extra_deps.iter().cloned());
-
-    if all_deps.is_empty() {
-        makefile.push_str("sdk-test:\n");
-    } else {
-        makefile.push_str(&format!("sdk-test: {}\n", all_deps.join(" ")));
-    }
-
-    if let Some(target) = test_target {
-        for command in target.commands() {
-            let rendered = render_command_for_makefile(command);
-            let trimmed = rendered.trim();
-
-            // Skip comment lines (starting with #)
-            if trimmed.starts_with('#') {
-                // Write as a Makefile comment (with tab like other commands)
-                makefile.push_str(&format!(
-                    "\t#{}\n",
-                    trimmed.strip_prefix('#').unwrap().trim_start()
-                ));
-                continue;
-            }
-
-            // Handle echo commands with @ prefix (like build commands)
-            if trimmed.starts_with('@') {
-                // Just pass through the @ command as-is, it's already properly formatted
-                makefile.push_str(&format!("\t{}\n", trimmed));
-                continue;
-            }
-
-            // Add regular command
-            makefile.push_str(&format!("\t{}\n", rendered));
-        }
-    }
-
-    makefile.push('\n');
-}
-
-/// Add the sdk-clean target to the Makefile
-pub(crate) fn add_clean_target(
-    makefile: &mut String,
-    clean_target: Option<&config::SdkTarget>,
-    extra_deps: &[String],
-) {
-    let mut all_deps = Vec::new();
-    if let Some(target) = clean_target {
-        if let Some(deps) = target.depends_on() {
-            all_deps.extend(deps.iter().cloned());
-        }
-    }
-    all_deps.extend(extra_deps.iter().cloned());
-
-    if all_deps.is_empty() {
-        makefile.push_str("sdk-clean:\n");
-    } else {
-        makefile.push_str(&format!("sdk-clean: {}\n", all_deps.join(" ")));
-    }
-
-    if let Some(target) = clean_target {
-        for command in target.commands() {
-            let rendered = render_command_for_makefile(command);
-            let trimmed = rendered.trim();
-
-            // Skip comment lines (starting with #)
-            if trimmed.starts_with('#') {
-                // Write as a Makefile comment (with tab like other commands)
-                makefile.push_str(&format!(
-                    "\t#{}\n",
-                    trimmed.strip_prefix('#').unwrap().trim_start()
-                ));
-                continue;
-            }
-
-            // Handle echo commands with @ prefix (like build commands)
-            if trimmed.starts_with('@') {
-                // Just pass through the @ command as-is, it's already properly formatted
-                makefile.push_str(&format!("\t{}\n", trimmed));
-                continue;
-            }
-
-            // Add regular command
-            makefile.push_str(&format!("\t{}\n", rendered));
-        }
-    } else if extra_deps.is_empty() {
-        makefile.push_str("\t@echo \"No clean commands defined in sdk.yml\"\n");
-    }
-
-    makefile.push('\n');
-}
-
-/// Add the sdk-build target to the Makefile
-pub(crate) fn add_build_target(
-    makefile: &mut String,
-    build_target: Option<&config::SdkTarget>,
-    extra_deps: &[String],
-) {
-    let mut all_deps = Vec::new();
-    if let Some(target) = build_target {
-        if let Some(deps) = target.depends_on() {
-            all_deps.extend(deps.iter().cloned());
-        }
-    }
-    all_deps.extend(extra_deps.iter().cloned());
-
-    if all_deps.is_empty() {
-        makefile.push_str("sdk-build:\n");
-    } else {
-        makefile.push_str(&format!("sdk-build: {}\n", all_deps.join(" ")));
-    }
-
-    if let Some(target) = build_target {
-        for command in target.commands() {
-            let rendered = render_command_for_makefile(command);
-            let trimmed = rendered.trim();
-
-            // Skip comment lines (starting with #)
-            if trimmed.starts_with('#') {
-                // Write as a Makefile comment (with tab like other commands)
-                makefile.push_str(&format!(
-                    "\t#{}\n",
-                    trimmed.strip_prefix('#').unwrap().trim_start()
-                ));
-                continue;
-            }
-
-            // Handle echo commands with @ prefix (like build commands)
-            if trimmed.starts_with('@') {
-                // Just pass through the @ command as-is, it's already properly formatted
-                makefile.push_str(&format!("\t{}\n", trimmed));
-                continue;
-            }
-
-            // Add regular command
-            makefile.push_str(&format!("\t{}\n", rendered));
-        }
-    } else if extra_deps.is_empty() {
-        makefile.push_str("\t@echo \"No build commands defined in sdk.yml\"\n");
-    }
-
-    makefile.push('\n');
-}
-
-/// Add the sdk-flash target to the Makefile
-pub(crate) fn add_flash_target(
-    makefile: &mut String,
-    flash_target: Option<&config::SdkTarget>,
-    extra_deps: &[String],
-) {
-    let mut all_deps = Vec::new();
-    if let Some(target) = flash_target {
-        if let Some(deps) = target.depends_on() {
-            all_deps.extend(deps.iter().cloned());
-        }
-    }
-    all_deps.extend(extra_deps.iter().cloned());
-
-    if all_deps.is_empty() {
-        makefile.push_str("sdk-flash:\n");
-    } else {
-        makefile.push_str(&format!("sdk-flash: {}\n", all_deps.join(" ")));
-    }
-
-    if let Some(target) = flash_target {
-        for command in target.commands() {
-            let rendered = render_command_for_makefile(command);
-            let trimmed = rendered.trim();
-
-            // Skip comment lines (starting with #)
-            if trimmed.starts_with('#') {
-                // Write as a Makefile comment (with tab like other commands)
-                makefile.push_str(&format!(
-                    "\t#{}\n",
-                    trimmed.strip_prefix('#').unwrap().trim_start()
-                ));
-                continue;
-            }
-
-            // Handle echo commands with @ prefix (like build commands)
-            if trimmed.starts_with('@') {
-                // Just pass through the @ command as-is, it's already properly formatted
-                makefile.push_str(&format!("\t{}\n", trimmed));
-                continue;
-            }
-
-            // Add regular command
-            makefile.push_str(&format!("\t{}\n", rendered));
-        }
-    } else if extra_deps.is_empty() {
-        makefile.push_str("\t@echo \"No flash commands defined in sdk.yml\"\n");
     }
 
     makefile.push('\n');
@@ -952,6 +741,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -991,6 +781,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1038,6 +829,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1123,6 +915,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1169,6 +962,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1207,6 +1001,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1241,14 +1036,14 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
 
-        // Should not include sdk-envsetup in PHONY or create target
-        assert!(makefile.contains(".PHONY: all"));
-        assert!(!makefile.contains("sdk-envsetup"));
+        // envsetup target is always generated (not in PHONY when empty)
+        assert!(makefile.contains("sdk-envsetup:"));
     }
 
     #[test]
@@ -1268,14 +1063,14 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
 
-        // Should not include sdk-envsetup
-        assert!(makefile.contains(".PHONY: all"));
-        assert!(!makefile.contains("sdk-envsetup"));
+        // envsetup target is always generated (not in PHONY when empty)
+        assert!(makefile.contains("sdk-envsetup:"));
     }
 
     #[test]
@@ -1288,7 +1083,7 @@ mod tests {
             "chmod +x scripts/setup.sh".to_string(),
         ]);
 
-        add_envsetup_target(&mut makefile, Some(&target), &[]);
+        add_phase_target(&mut makefile, "envsetup", Some(&target), &[], None);
 
         assert!(makefile.contains("sdk-envsetup:"));
         assert!(makefile.contains("\t#Initial setup"));
@@ -1320,6 +1115,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1361,6 +1157,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1395,14 +1192,14 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
 
-        // Should not include sdk-test in PHONY or create target
-        assert!(makefile.contains(".PHONY: all"));
-        assert!(!makefile.contains("sdk-test"));
+        // test target is always generated (not in PHONY when empty)
+        assert!(makefile.contains("sdk-test:"));
     }
 
     #[test]
@@ -1422,14 +1219,14 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
 
-        // Should not include sdk-test
-        assert!(makefile.contains(".PHONY: all"));
-        assert!(!makefile.contains("sdk-test"));
+        // test target is always generated (not in PHONY when empty)
+        assert!(makefile.contains("sdk-test:"));
     }
 
     #[test]
@@ -1442,7 +1239,7 @@ mod tests {
             "cargo test --verbose".to_string(),
         ]);
 
-        add_test_target(&mut makefile, Some(&target), &[]);
+        add_phase_target(&mut makefile, "test", Some(&target), &[], None);
 
         assert!(makefile.contains("sdk-test:"));
         assert!(makefile.contains("\t#Run comprehensive tests"));
@@ -1473,6 +1270,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1554,6 +1352,7 @@ mod tests {
             build: None,
             flash: None,
             variables: Some(vars),
+            phases: None,
             direnv: None,
         };
 
@@ -1599,6 +1398,7 @@ mod tests {
             build: None,
             flash: None,
             variables: Some(vars),
+            phases: None,
             direnv: None,
         };
 
@@ -1636,6 +1436,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -1688,6 +1489,7 @@ mod tests {
             build: None,
             flash: None,
             variables: Some(vars),
+            phases: None,
             direnv: None,
         };
 
@@ -1748,6 +1550,7 @@ mod tests {
             build: None,
             flash: None,
             variables: Some(vars),
+            phases: None,
             direnv: None,
         };
 
@@ -1798,6 +1601,7 @@ mod tests {
             build: None,
             flash: None,
             variables: Some(vars),
+            phases: None,
             direnv: None,
         };
 
@@ -1873,6 +1677,7 @@ mod tests {
             build: None,
             flash: None,
             variables: Some(vars),
+            phases: None,
             direnv: None,
         };
 
@@ -2029,6 +1834,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2067,6 +1873,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2110,6 +1917,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2158,6 +1966,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2210,6 +2019,7 @@ mod tests {
             build: None,
             flash: None,
             variables: Some(vars),
+            phases: None,
             direnv: None,
         };
 
@@ -2263,6 +2073,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2312,6 +2123,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2389,6 +2201,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2437,6 +2250,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2531,6 +2345,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2597,6 +2412,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2662,6 +2478,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2716,6 +2533,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2822,7 +2640,8 @@ mod tests {
             documentation_dir: None,
         }];
 
-        let phase_deps = discover_overlay_phase_targets(tmp.path(), &gits, None, &[]);
+        let phases = config::default_phases();
+        let phase_deps = discover_overlay_phase_targets(tmp.path(), &gits, None, &[], &phases);
         assert_eq!(
             phase_deps.get("build"),
             Some(&vec!["u-boot-build".to_string()])
@@ -2858,7 +2677,8 @@ mod tests {
             documentation_dir: None,
         }];
 
-        let phase_deps = discover_overlay_phase_targets(tmp.path(), &gits, None, &[]);
+        let phases = config::default_phases();
+        let phase_deps = discover_overlay_phase_targets(tmp.path(), &gits, None, &[], &phases);
         assert!(phase_deps.is_empty(), "Expected no phase deps when overlay lacks <repo>-<phase> targets");
     }
 
@@ -2895,6 +2715,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2944,6 +2765,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -2994,6 +2816,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -3063,6 +2886,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -3118,6 +2942,7 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
+            phases: None,
             direnv: None,
         };
 
@@ -3129,6 +2954,74 @@ mod tests {
             !makefile.contains("u-boot-build"),
             "Expected excluded repo's overlay target to be ignored, got:\n{}",
             makefile
+        );
+    }
+
+    #[test]
+    fn test_generate_makefile_custom_phases() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let build_dir = tmp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("create build dir");
+        std::fs::write(
+            build_dir.join("u-boot.mk"),
+            "u-boot-deploy:\n\t@echo deploying u-boot\n",
+        )
+        .expect("write u-boot.mk");
+
+        let config = config::SdkConfig {
+            toolchains: None,
+            install: None,
+            mirror: PathBuf::from("/tmp/mirror"),
+            gits: vec![config::GitConfig {
+                name: "u-boot".to_string(),
+                url: "https://example.com/u-boot.git".to_string(),
+                commit: "main".to_string(),
+                build_depends_on: None,
+                git_depends_on: None,
+                build: None,
+                documentation_dir: None,
+            }],
+            copy_files: None,
+            makefile_include: None,
+            build_folder: None,
+            envsetup: None,
+            test: None,
+            clean: None,
+            build: None,
+            flash: None,
+            variables: None,
+            phases: Some(vec!["build".to_string(), "deploy".to_string()]),
+            direnv: None,
+        };
+
+        let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
+
+        // sdk-build should be generated (no deps, no commands, fallback message)
+        assert!(
+            makefile.contains("sdk-build:"),
+            "Expected sdk-build target, got:\n{}",
+            makefile
+        );
+
+        // sdk-deploy should be generated with u-boot-deploy as dependency
+        assert!(
+            makefile.contains("sdk-deploy: u-boot-deploy"),
+            "Expected sdk-deploy to depend on u-boot-deploy, got:\n{}",
+            makefile
+        );
+
+        // sdk-test, sdk-clean, sdk-flash should NOT appear since they're not in phases
+        assert!(
+            !makefile.contains("sdk-test:"),
+            "Expected no sdk-test when not in phases list"
+        );
+        assert!(
+            !makefile.contains("sdk-clean:"),
+            "Expected no sdk-clean when not in phases list"
+        );
+        assert!(
+            !makefile.contains("sdk-flash:"),
+            "Expected no sdk-flash when not in phases list"
         );
     }
 }
