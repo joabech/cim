@@ -2982,6 +2982,7 @@ mod tests {
         )
         .expect("write u-boot.mk");
 
+        // Custom phases are *added* to the five standard ones
         let config = config::SdkConfig {
             toolchains: None,
             install: None,
@@ -3004,38 +3005,36 @@ mod tests {
             build: None,
             flash: None,
             variables: None,
-            phases: Some(vec!["build".to_string(), "deploy".to_string()]),
+            phases: Some(vec!["deploy".to_string()]),
             direnv: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
 
-        // sdk-build should be generated (no deps, no commands, fallback message)
+        // Standard phases are always present
         assert!(
             makefile.contains("sdk-build:"),
             "Expected sdk-build target, got:\n{}",
             makefile
         );
+        assert!(
+            makefile.contains("sdk-test:"),
+            "Expected sdk-test target (standard phase)"
+        );
+        assert!(
+            makefile.contains("sdk-clean:"),
+            "Expected sdk-clean target (standard phase)"
+        );
+        assert!(
+            makefile.contains("sdk-flash:"),
+            "Expected sdk-flash target (standard phase)"
+        );
 
-        // sdk-deploy should be generated with u-boot-deploy as dependency
+        // Custom phase added via phases:
         assert!(
             makefile.contains("sdk-deploy: u-boot-deploy"),
             "Expected sdk-deploy to depend on u-boot-deploy, got:\n{}",
             makefile
-        );
-
-        // sdk-test, sdk-clean, sdk-flash should NOT appear since they're not in phases
-        assert!(
-            !makefile.contains("sdk-test:"),
-            "Expected no sdk-test when not in phases list"
-        );
-        assert!(
-            !makefile.contains("sdk-clean:"),
-            "Expected no sdk-clean when not in phases list"
-        );
-        assert!(
-            !makefile.contains("sdk-flash:"),
-            "Expected no sdk-flash when not in phases list"
         );
     }
 }

@@ -296,7 +296,10 @@ pub trait SdkConfigCore {
     fn build_folder(&self) -> &Option<String>;
     /// Ordered list of phase names.  Controls which `sdk-<phase>` targets are
     /// generated and which `<repo>-<phase>` overlay targets are discovered.
-    /// When absent the default `[envsetup, build, clean, test, flash]` is used.
+    ///
+    /// The five standard phases (`envsetup`, `build`, `clean`, `test`, `flash`)
+    /// are always included.  The `phases:` key in `sdk.yml` is used to add
+    /// *extra* custom phases (e.g. `deploy`, `lint`) on top of the standard set.
     fn phases(&self) -> Vec<String>;
     /// Look up the top-level SDK target for a given phase name.
     /// Returns `None` when the phase is not defined in `sdk.yml`.
@@ -660,7 +663,15 @@ impl SdkConfigCore for SdkConfig {
     }
 
     fn phases(&self) -> Vec<String> {
-        self.phases.clone().unwrap_or_else(default_phases)
+        let mut result = default_phases();
+        if let Some(extra) = &self.phases {
+            for phase in extra {
+                if !result.contains(phase) {
+                    result.push(phase.clone());
+                }
+            }
+        }
+        result
     }
 
     fn phase_target(&self, phase: &str) -> Option<&SdkTarget> {
