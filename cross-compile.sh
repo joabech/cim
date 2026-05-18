@@ -19,6 +19,9 @@ TARGETS=(
     "x86_64-unknown-linux-gnu"
 )
 
+# Force amd64 images on Apple Silicon — cross-rs images lack arm64 variants
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+
 # Global variables
 CONTINUE_ON_ERROR=false
 SELECTED_TARGETS=()
@@ -69,7 +72,7 @@ build_target() {
     
     # Capture both stdout and stderr to a temporary file
     local build_log=$(mktemp)
-    if cross build --release --target "$target" 2>&1 | tee "$build_log"; then
+    if cargo build --release --target "$target" 2>&1 | tee "$build_log"; then
         log_success "Build completed for $target"
         SUCCESSFUL_TARGETS+=("$target")
         rm -f "$build_log"
@@ -89,11 +92,6 @@ build_target() {
             log_warning "Missing target support detected."
             log_info "Try installing the target with:"
             echo "    rustup target add $target"
-            echo
-        elif grep -q "Docker" "$build_log" || grep -q "docker" "$build_log"; then
-            echo
-            log_warning "Docker-related issue detected."
-            log_info "Make sure Docker is running and accessible."
             echo
         fi
         
