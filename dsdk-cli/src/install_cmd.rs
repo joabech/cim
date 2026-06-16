@@ -488,6 +488,29 @@ fn python_command() -> &'static str {
     }
 }
 
+/// Resolve the absolute path of the system Python interpreter that the stdlib
+/// venv path would use, so the uv backend can be pinned to the same one.
+///
+/// Returns `None` if the interpreter cannot be located, in which case uv falls
+/// back to its own interpreter discovery.
+fn resolve_system_python() -> Option<PathBuf> {
+    let output = std::process::Command::new(python_command())
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
 /// Check whether the `uv` binary is available on PATH.
 ///
 /// When present, uv is used as a faster, drop-in backend for creating virtual
@@ -513,11 +536,19 @@ fn run_python_venv_creation(workspace_path: &Path) -> Result<(), Box<dyn std::er
 
     // Prefer uv when available: `uv venv` creates a standard venv and does not
     // need a separate ensurepip/upgrade step (uv manages installs itself).
+    //
+    // Pin the interpreter to the same `python3` the stdlib fallback would use.
+    // Without `--python`, uv applies its own discovery and may prefer a
+    // uv-managed CPython download over the system interpreter, producing a venv
+    // on a different Python version than the fallback path — defeating the
+    // "identical with or without uv" guarantee.
     if uv_available() {
-        let output = std::process::Command::new("uv")
-            .arg("venv")
-            .arg(&venv_path)
-            .output()?;
+        let mut command = std::process::Command::new("uv");
+        command.arg("venv");
+        if let Some(python) = resolve_system_python() {
+            command.arg("--python").arg(python);
+        }
+        let output = command.arg(&venv_path).output()?;
 
         if !output.status.success() {
             return Err(format!(
