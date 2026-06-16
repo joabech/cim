@@ -11,8 +11,8 @@
 
 use crate::cli::DocsCommand;
 use crate::install_cmd::{
-    ensure_docs_dependencies, install_prerequisites, install_python_packages_from_file,
-    is_container_environment,
+    ensure_docs_dependencies, install_git_python_deps, install_prerequisites,
+    install_python_packages_from_file, is_container_environment,
 };
 use crate::makefile::generate_makefile_content;
 use crate::update_cmd::{update_mirror_repos, update_workspace_repos_with_result};
@@ -624,6 +624,16 @@ pub(crate) fn install_pip_packages_if_available(
             return Ok(()); // Non-fatal, continue with next steps
         }
     };
+
+    // Install per-repo Python deps declared in sdk.yml gits: entries into
+    // isolated venvs at .cim/<git>/.venv. This is independent of
+    // python-dependencies.yml, so it runs even when that file is absent.
+    for git in &sdk_config.gits {
+        if let Some(reqs) = &git.python_deps {
+            messages::status("");
+            install_git_python_deps(workspace_path, &git.name, reqs, false)?;
+        }
+    }
 
     // Check if python-dependencies.yml exists
     let python_deps_path = workspace_path.join(PYTHON_DEPS_FILE);
