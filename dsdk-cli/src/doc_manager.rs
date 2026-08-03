@@ -751,6 +751,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             toolchains: None,
             copy_files: None,

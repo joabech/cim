@@ -828,6 +828,7 @@ mod tests {
             build: Some(vec!["make".to_string(), "make install".to_string()]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let config = config::SdkConfig {
@@ -866,6 +867,7 @@ mod tests {
             build: Some(vec!["@echo Building base".to_string()]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let git2 = config::GitConfig {
@@ -877,6 +879,7 @@ mod tests {
             build: Some(vec!["# This is a comment".to_string(), "make".to_string()]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let config = config::SdkConfig {
@@ -917,6 +920,7 @@ mod tests {
             build: None,
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let emitted = add_makefile_target(&mut makefile, &git_config);
@@ -944,6 +948,7 @@ mod tests {
             ]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         add_makefile_target(&mut makefile, &git_config);
@@ -967,6 +972,7 @@ mod tests {
             build: Some(vec![]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let config = config::SdkConfig {
@@ -1003,6 +1009,7 @@ mod tests {
             build: Some(vec!["echo hello".to_string()]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let mut makefile = String::new();
@@ -1630,6 +1637,7 @@ mod tests {
             build: Some(vec!["make".to_string()]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let mut vars = std::collections::HashMap::new();
@@ -1706,6 +1714,7 @@ mod tests {
             build: Some(vec!["make".to_string()]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         };
 
         let mut vars = std::collections::HashMap::new();
@@ -1772,6 +1781,7 @@ mod tests {
             build: None,
             documentation_dir: None,
             python_deps: None,
+            group: None,
         }];
         let found = discover_git_mk_files(tmp.path(), &gits, None, &[]);
         assert!(
@@ -1797,6 +1807,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             },
             config::GitConfig {
                 name: "linux".to_string(),
@@ -1807,6 +1818,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             },
         ];
 
@@ -1832,6 +1844,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             },
             config::GitConfig {
                 name: "linux".to_string(),
@@ -1842,6 +1855,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             },
             config::GitConfig {
                 name: "trusted-firmware-a".to_string(),
@@ -1852,6 +1866,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             },
         ];
 
@@ -1884,6 +1899,7 @@ mod tests {
                 build: Some(vec!["$(MAKE) u-boot-build".to_string()]),
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -1923,6 +1939,7 @@ mod tests {
                 build: Some(vec!["$(MAKE) -C u-boot".to_string()]),
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -1965,6 +1982,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: Some(config::MakefileInclude::Legacy(vec![
@@ -2016,6 +2034,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2069,6 +2088,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2123,6 +2143,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2173,6 +2194,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2213,6 +2235,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             },
             config::GitConfig {
                 name: "u-boot".to_string(),
@@ -2223,6 +2246,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             },
         ];
 
@@ -2253,6 +2277,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2302,6 +2327,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2382,6 +2408,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
                 config::GitConfig {
                     name: "trusted-services".to_string(),
@@ -2392,6 +2419,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
             ],
             copy_files: None,
@@ -2450,6 +2478,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
                 config::GitConfig {
                     name: "trusted-services".to_string(),
@@ -2460,6 +2489,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
             ],
             copy_files: None,
@@ -2517,6 +2547,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
                 config::GitConfig {
                     name: "trusted-services".to_string(),
@@ -2527,6 +2558,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
             ],
             copy_files: None,
@@ -2586,6 +2618,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: Some(config::MakefileInclude::Legacy(vec![
@@ -2695,6 +2728,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
                 config::GitConfig {
                     name: "linux-stable".to_string(),
@@ -2705,6 +2739,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
             ],
             copy_files: None,
@@ -2758,6 +2793,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2803,6 +2839,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2845,6 +2882,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -2896,6 +2934,7 @@ mod tests {
             build: None,
             documentation_dir: None,
             python_deps: None,
+            group: None,
         }];
 
         let phases = config::default_phases();
@@ -2930,6 +2969,7 @@ mod tests {
             build: None,
             documentation_dir: None,
             python_deps: None,
+            group: None,
         }];
 
         let phases = config::default_phases();
@@ -2967,6 +3007,7 @@ mod tests {
             build: None,
             documentation_dir: None,
             python_deps: None,
+            group: None,
         }];
 
         let phases = config::default_phases();
@@ -3012,6 +3053,7 @@ mod tests {
                 build: Some(vec!["@echo Top-level build".to_string()]),
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -3062,6 +3104,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -3110,6 +3153,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
@@ -3170,6 +3214,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
                 config::GitConfig {
                     name: "linux".to_string(),
@@ -3180,6 +3225,7 @@ mod tests {
                     build: None,
                     documentation_dir: None,
                     python_deps: None,
+                    group: None,
                 },
             ],
             copy_files: None,
@@ -3232,6 +3278,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: Some(config::MakefileInclude::Structured(
@@ -3286,6 +3333,7 @@ mod tests {
                 build: None,
                 documentation_dir: None,
                 python_deps: None,
+                group: None,
             }],
             copy_files: None,
             makefile_include: None,
