@@ -805,6 +805,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -846,6 +847,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -897,6 +899,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -990,6 +993,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1038,6 +1042,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1076,6 +1081,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1110,6 +1116,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1136,6 +1143,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1187,6 +1195,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1228,6 +1237,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1262,6 +1272,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1288,6 +1299,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1338,6 +1350,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1419,6 +1432,7 @@ mod tests {
             variables: Some(vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1464,6 +1478,7 @@ mod tests {
             variables: Some(vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1501,6 +1516,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1553,6 +1569,7 @@ mod tests {
             variables: Some(vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1613,6 +1630,7 @@ mod tests {
             variables: Some(vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1665,6 +1683,7 @@ mod tests {
             variables: Some(vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, true, None);
@@ -1742,6 +1761,7 @@ mod tests {
             variables: Some(vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -1912,6 +1932,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -1952,6 +1973,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -1997,6 +2019,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2047,6 +2070,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, true, Some(tmp.path()));
@@ -2101,6 +2125,7 @@ mod tests {
             variables: Some(vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2156,6 +2181,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2207,6 +2233,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2290,6 +2317,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         // Use a *different* directory as the workspace root so we can confirm
@@ -2340,6 +2368,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2438,6 +2467,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2508,6 +2538,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2577,6 +2608,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2633,6 +2665,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -2753,6 +2786,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -2806,6 +2840,7 @@ mod tests {
             variables: Some(user_vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -2852,6 +2887,7 @@ mod tests {
             variables: Some(user_vars),
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -2895,6 +2931,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, None);
@@ -3066,6 +3103,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -3117,6 +3155,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -3166,6 +3205,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -3239,6 +3279,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -3296,6 +3337,7 @@ mod tests {
             variables: None,
             phases: None,
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
@@ -3346,6 +3388,7 @@ mod tests {
             variables: None,
             phases: Some(vec!["deploy".to_string()]),
             direnv: None,
+            extends: None,
         };
 
         let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
