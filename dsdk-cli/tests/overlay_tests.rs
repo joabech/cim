@@ -16,9 +16,10 @@ mod common;
 use common::{create_complex_sdk_config, create_minimal_sdk_config};
 use dsdk_cli::config::{CopyFileConfig, GitConfig, InstallConfig, ToolchainConfig};
 use dsdk_cli::overlay::{
-    apply_overlay, merge_copy_files, merge_gits, merge_install, merge_toolchains, merge_variables,
-    validate_dependencies, CopyFilePatch, CopyFilesOverlay, GitPatch, GitsOverlay, InstallOverlay,
-    InstallPatch, OverlayConfig, ToolchainPatch, ToolchainsOverlay, VariablesOverlay,
+    apply_overlay, compute_owned_entries, merge_copy_files, merge_gits, merge_install,
+    merge_toolchains, merge_variables, validate_dependencies, CopyFilePatch, CopyFilesOverlay,
+    GitPatch, GitsOverlay, InstallOverlay, InstallPatch, OverlayConfig, ToolchainPatch,
+    ToolchainsOverlay, VariablesOverlay,
 };
 use std::collections::HashMap;
 
@@ -455,4 +456,79 @@ fn test_validate_dependencies_dangling_install_depends_on() {
 
     let err = validate_dependencies(&config).unwrap_err();
     assert!(err.contains("missing-install"));
+}
+
+// ---------------------------------------------------------------------
+// compute_owned_entries tests
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_compute_owned_entries_across_all_sections() {
+    let overlay = OverlayConfig {
+        gits: Some(GitsOverlay {
+            add: vec![new_git(
+                "drone-camera",
+                "https://example.com/camera.git",
+                "main",
+            )],
+            remove: vec!["mcuboot".to_string()],
+            modify: vec![GitPatch {
+                name: "zephyr".to_string(),
+                url: None,
+                commit: Some("v4.5.0".to_string()),
+                build_depends_on: None,
+                git_depends_on: None,
+                build: None,
+                documentation_dir: None,
+                python_deps: None,
+                group: None,
+            }],
+        }),
+        toolchains: Some(ToolchainsOverlay {
+            add: vec![new_toolchain("gcc-drone")],
+            remove: vec![],
+            modify: vec![],
+        }),
+        install: Some(InstallOverlay {
+            add: vec![],
+            remove: vec![],
+            modify: vec![InstallPatch {
+                name: "protoc".to_string(),
+                depends_on: None,
+                sentinel: None,
+                commands: None,
+            }],
+        }),
+        copy_files: Some(CopyFilesOverlay {
+            add: vec![new_copy_file("patches/drone.patch")],
+            remove: vec![],
+            modify: vec![],
+        }),
+        variables: None,
+    };
+
+    let owned = compute_owned_entries(&overlay);
+
+    assert_eq!(owned.gits.len(), 2); // drone-camera (add) + zephyr (modify)
+    assert!(owned.gits.contains("drone-camera"));
+    assert!(owned.gits.contains("zephyr"));
+    assert!(!owned.gits.contains("mcuboot")); // remove: doesn't count as "owned"
+
+    assert_eq!(owned.toolchains.len(), 1);
+    assert!(owned.toolchains.contains("gcc-drone"));
+
+    assert_eq!(owned.install.len(), 1);
+    assert!(owned.install.contains("protoc"));
+
+    assert_eq!(owned.copy_files.len(), 1);
+    assert!(owned.copy_files.contains("patches/drone.patch"));
+}
+
+#[test]
+fn test_compute_owned_entries_default_overlay_is_empty() {
+    let owned = compute_owned_entries(&OverlayConfig::default());
+    assert!(owned.gits.is_empty());
+    assert!(owned.toolchains.is_empty());
+    assert!(owned.install.is_empty());
+    assert!(owned.copy_files.is_empty());
 }

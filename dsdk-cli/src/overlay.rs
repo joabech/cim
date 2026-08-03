@@ -677,3 +677,56 @@ pub fn validate_dependencies(config: &SdkConfig) -> Result<(), String> {
         ))
     }
 }
+
+/// Names of the entries "owned" by an overlay.yml -- i.e. added or modified
+/// by this target, as opposed to inherited unmodified from the base target.
+/// Used by commands that must scope their effect (or their writes back to
+/// disk) to only what a derived target's own manifest actually controls:
+/// `cim release` (tagging/freezing commits) and `cim utils hash-toolchains`/
+/// `hash-copy-files` (writing computed hashes back into a manifest file).
+#[derive(Debug, Clone, Default)]
+pub struct OwnedEntries {
+    pub gits: std::collections::HashSet<String>,
+    pub toolchains: std::collections::HashSet<String>,
+    pub install: std::collections::HashSet<String>,
+    pub copy_files: std::collections::HashSet<String>,
+}
+
+/// Compute the set of entry identities (`name`, or `dest` for copy_files)
+/// added or modified by `overlay`, per section.
+pub fn compute_owned_entries(overlay: &OverlayConfig) -> OwnedEntries {
+    let mut owned = OwnedEntries::default();
+
+    if let Some(gits) = &overlay.gits {
+        owned.gits.extend(gits.add.iter().map(|g| g.name.clone()));
+        owned
+            .gits
+            .extend(gits.modify.iter().map(|p| p.name.clone()));
+    }
+    if let Some(toolchains) = &overlay.toolchains {
+        owned
+            .toolchains
+            .extend(toolchains.add.iter().map(|t| t.get_name()));
+        owned
+            .toolchains
+            .extend(toolchains.modify.iter().map(|p| p.name.clone()));
+    }
+    if let Some(install) = &overlay.install {
+        owned
+            .install
+            .extend(install.add.iter().map(|i| i.name.clone()));
+        owned
+            .install
+            .extend(install.modify.iter().map(|p| p.name.clone()));
+    }
+    if let Some(copy_files) = &overlay.copy_files {
+        owned
+            .copy_files
+            .extend(copy_files.add.iter().map(|c| c.dest.clone()));
+        owned
+            .copy_files
+            .extend(copy_files.modify.iter().map(|p| p.dest.clone()));
+    }
+
+    owned
+}
