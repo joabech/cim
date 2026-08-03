@@ -24,7 +24,8 @@
 //! to avoid silently masking manifest authoring mistakes.
 
 use crate::config::{
-    deserialize_string_or_vec, CopyFileConfig, GitConfig, InstallConfig, SdkConfig, ToolchainConfig,
+    deserialize_string_or_vec, CopyFileConfig, GitConfig, InstallConfig, SdkConfig, SdkConfigCore,
+    ToolchainConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -619,23 +620,35 @@ pub fn apply_overlay(
 /// final, fully-merged configuration. Collects every dangling reference into
 /// a single error rather than failing on the first one, so a manifest author
 /// can fix them all in one pass.
+///
+/// `build_depends_on` is emitted verbatim as a Makefile prerequisite (see
+/// `makefile::add_makefile_target`), so besides other git names it may also
+/// legitimately reference a phase target (`sdk-envsetup`, `sdk-build`, ...)
+/// or an install target (`install-<name>`); both are accepted here.
+/// `git_depends_on` (clone ordering) only makes sense against other gits.
 pub fn validate_dependencies(config: &SdkConfig) -> Result<(), String> {
     let git_names: std::collections::HashSet<&str> =
         config.gits.iter().map(|g| g.name.as_str()).collect();
-    let install_names: std::collections::HashSet<&str> = config
+    let install_names: std::collections::HashSet<String> = config
         .install
         .as_ref()
-        .map(|installs| installs.iter().map(|i| i.name.as_str()).collect())
+        .map(|installs| installs.iter().map(|i| i.name.clone()).collect())
         .unwrap_or_default();
+
+    let mut valid_build_targets: std::collections::HashSet<String> =
+        git_names.iter().map(|n| n.to_string()).collect();
+    valid_build_targets.extend(config.phases().iter().map(|p| format!("sdk-{}", p)));
+    valid_build_targets.extend(install_names.iter().map(|n| format!("install-{}", n)));
 
     let mut errors = Vec::new();
 
     for git in &config.gits {
         if let Some(deps) = &git.build_depends_on {
             for dep in deps {
-                if !git_names.contains(dep.as_str()) {
+                if !valid_build_targets.contains(dep.as_str()) {
                     errors.push(format!(
-                        "git '{}': build_depends_on references unknown git '{}'",
+                        "git '{}': build_depends_on references unknown target '{}' \
+                         (not a git, phase, or install target)",
                         git.name, dep
                     ));
                 }

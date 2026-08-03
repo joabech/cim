@@ -430,6 +430,66 @@ fn test_validate_dependencies_ok() {
 }
 
 #[test]
+fn test_validate_dependencies_allows_phase_target_in_build_depends_on() {
+    // build_depends_on is emitted verbatim as a Makefile prerequisite, so
+    // besides other git names it may legitimately reference a phase target
+    // like "sdk-envsetup" (a real, documented, pre-existing manifest
+    // pattern -- see the "example" target in cim-manifests).
+    let mut config = create_minimal_sdk_config();
+    config.gits = vec![GitConfig {
+        name: "git-sandbox".to_string(),
+        url: "https://example.com/git-sandbox.git".to_string(),
+        commit: "master".to_string(),
+        build_depends_on: Some(vec!["sdk-envsetup".to_string()]),
+        git_depends_on: None,
+        build: None,
+        documentation_dir: None,
+        python_deps: None,
+        group: None,
+    }];
+
+    assert!(validate_dependencies(&config).is_ok());
+}
+
+#[test]
+fn test_validate_dependencies_allows_install_target_in_build_depends_on() {
+    let mut config = create_minimal_sdk_config();
+    config.install = Some(vec![new_install("protoc", None)]);
+    config.gits = vec![GitConfig {
+        name: "app".to_string(),
+        url: "https://example.com/app.git".to_string(),
+        commit: "main".to_string(),
+        build_depends_on: Some(vec!["install-protoc".to_string()]),
+        git_depends_on: None,
+        build: None,
+        documentation_dir: None,
+        python_deps: None,
+        group: None,
+    }];
+
+    assert!(validate_dependencies(&config).is_ok());
+}
+
+#[test]
+fn test_validate_dependencies_still_rejects_truly_unknown_target() {
+    let mut config = create_minimal_sdk_config();
+    config.gits = vec![GitConfig {
+        name: "app".to_string(),
+        url: "https://example.com/app.git".to_string(),
+        commit: "main".to_string(),
+        build_depends_on: Some(vec!["totally-made-up-target".to_string()]),
+        git_depends_on: None,
+        build: None,
+        documentation_dir: None,
+        python_deps: None,
+        group: None,
+    }];
+
+    let err = validate_dependencies(&config).unwrap_err();
+    assert!(err.contains("totally-made-up-target"));
+}
+
+#[test]
 fn test_validate_dependencies_dangling_build_depends_on() {
     let mut config = create_minimal_sdk_config();
     config.gits = vec![GitConfig {

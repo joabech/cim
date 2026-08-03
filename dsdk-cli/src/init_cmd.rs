@@ -539,6 +539,27 @@ pub(crate) fn resolve_target_from_sources(
     Err(msg)
 }
 
+/// Rewrite copy_files entries' local (non-URL, non-absolute) `source` paths
+/// to be absolute, resolved against `base_dir` (the directory containing
+/// the sdk.yml/overlay.yml that declared them).
+///
+/// The primary target's own entries never need this: `process_copy_files`
+/// already resolves them against the primary's directory. But entries
+/// contributed by an `extends:` ancestor (or its overlay.yml) must resolve
+/// against THAT ancestor's own manifest directory instead -- otherwise, for
+/// example, a base target's `source: extra.mk` would incorrectly be looked
+/// up inside the derived target's directory and silently fail to be found.
+pub(crate) fn resolve_local_copy_file_sources(
+    copy_files: &mut [config::CopyFileConfig],
+    base_dir: &Path,
+) {
+    for entry in copy_files.iter_mut() {
+        if !is_url(&entry.source) && !Path::new(&entry.source).is_absolute() {
+            entry.source = base_dir.join(&entry.source).to_string_lossy().to_string();
+        }
+    }
+}
+
 /// One target's file (sdk.yml or overlay.yml) that must be copied into the
 /// workspace, along with the destination filename it should get there. The
 /// primary (originally-requested) target always keeps the bare `sdk.yml`/
@@ -600,7 +621,7 @@ fn resolve_extends_chain_from_source_inner(
         ));
     }
 
-    let derived = config::load_config(config_path)
+    let mut derived = config::load_config(config_path)
         .map_err(|e| format!("Failed to load config for target '{}': {}", target, e))?;
 
     let is_primary = depth == 0;
@@ -612,6 +633,20 @@ fn resolve_extends_chain_from_source_inner(
             format!("{}-{}", target, OVERLAY_CONFIG_FILE),
         )
     };
+
+    // Ancestor-contributed copy_files entries with a local (non-URL,
+    // non-absolute) source path must resolve against THAT ancestor's own
+    // manifest directory, not the primary target's directory -- otherwise
+    // e.g. a base target's `source: extra.mk` would be looked up (and fail
+    // to be found) inside the derived target's own directory instead. The
+    // primary's own entries need no rewriting: process_copy_files already
+    // resolves them against the primary's directory.
+    if !is_primary {
+        if let Some(copy_files) = &mut derived.copy_files {
+            let ancestor_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+            resolve_local_copy_file_sources(copy_files, ancestor_dir);
+        }
+    }
 
     let Some(extends) = derived.extends.clone() else {
         return Ok(ExtendsResolution {
@@ -661,12 +696,30 @@ fn resolve_extends_chain_from_source_inner(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(OVERLAY_CONFIG_FILE);
-    let overlay_config = if overlay_path.exists() {
+    let mut overlay_config = if overlay_path.exists() {
         overlay::load_overlay_config(&overlay_path)
             .map_err(|e| format!("Failed to load overlay.yml for target '{}': {}", target, e))?
     } else {
         overlay::OverlayConfig::default()
     };
+
+    // Same rewriting as above, but for copy_files entries added/modified by
+    // an ancestor's own overlay.yml (only relevant when this level isn't
+    // the primary target).
+    if !is_primary {
+        if let Some(copy_files_overlay) = &mut overlay_config.copy_files {
+            let ancestor_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+            resolve_local_copy_file_sources(&mut copy_files_overlay.add, ancestor_dir);
+            for patch in &mut copy_files_overlay.modify {
+                if let Some(source) = &patch.source {
+                    if !is_url(source) && !Path::new(source).is_absolute() {
+                        patch.source =
+                            Some(ancestor_dir.join(source).to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
 
     let mut files_to_copy = vec![TargetFilePair {
         dest_name: sdk_dest_name,
@@ -2459,6 +2512,51 @@ gits:
         assert!(dest_names.contains(&"overlay.yml"));
         assert!(dest_names.contains(&"platform-sdk-sdk.yml"));
         assert!(!dest_names.contains(&"platform-sdk-overlay.yml")); // platform-sdk has no overlay.yml
+    }
+
+    #[test]
+    fn test_resolve_extends_chain_rewrites_ancestor_local_copy_file_sources() {
+        // A base target's local (non-URL, non-absolute) copy_files source
+        // must resolve against the BASE's own directory, not the derived
+        // target's directory -- regression test for a real bug found while
+        // testing the "example"-extending "overlay-example" manifest.
+        let (_temp_dir, root) = create_test_workspace();
+        write_target(
+            &root,
+            "base-sdk",
+            "gits: []\ncopy_files:\n  - source: extra.mk\n    dest: extra.mk\n",
+            None,
+        );
+        // Create the actual local file next to base-sdk's own sdk.yml.
+        fs::write(
+            root.join("targets").join("base-sdk").join("extra.mk"),
+            "# extra makefile fragment\n",
+        )
+        .expect("Failed to write base-sdk/extra.mk");
+
+        write_target(&root, "drone-target", "gits: []\nextends: base-sdk\n", None);
+
+        let config_path = resolve_target_config("drone-target", &root).expect("should resolve");
+        let sources = vec![root.to_string_lossy().to_string()];
+        let resolution = resolve_extends_chain_from_source(&config_path, "drone-target", &sources)
+            .expect("should resolve extends chain");
+
+        let copy_files = resolution
+            .merged
+            .copy_files
+            .expect("copy_files should be inherited from base-sdk");
+        assert_eq!(copy_files.len(), 1);
+        let resolved_source = PathBuf::from(&copy_files[0].source);
+        assert!(
+            resolved_source.is_absolute(),
+            "expected an absolute path, got {}",
+            copy_files[0].source
+        );
+        assert!(
+            resolved_source.exists(),
+            "resolved source {} should point at base-sdk's own extra.mk",
+            resolved_source.display()
+        );
     }
 
     #[test]
