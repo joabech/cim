@@ -16,13 +16,14 @@ use dsdk_cli::download::{
 use dsdk_cli::workspace::{
     copy_dir_recursive, expand_env_vars, expand_manifest_vars_in_config, is_url,
     load_config_with_user_overrides, require_workspace_config,
-    resolve_config_source_dir_from_marker, resolve_mirror,
+    resolve_config_source_dir_from_marker, resolve_mirror, OVERLAY_CONFIG_FILE,
 };
 
 #[cfg(test)]
 use dsdk_cli::workspace::SDK_CONFIG_FILE;
 use dsdk_cli::{config, git_operations, messages};
 use regex::Regex;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -68,6 +69,49 @@ pub(crate) fn handle_release_command(
 
     let sdk_config = match load_config_with_user_overrides(&config_path, false) {
         Ok(config) => config,
+        Err(e) => {
+            messages::error(&format!("Error loading config: {}", e));
+            return;
+        }
+    };
+
+    // If this workspace's sdk.yml declares extends:, the base target's own
+    // gits are already pinned via the explicit extends: version and are
+    // released independently, under the base target's own scheme. A
+    // derived target's release therefore only touches gits it actually
+    // owns: the ones added or modified by its own overlay.yml. Inherited,
+    // unmodified base gits are left completely untouched (not tagged, not
+    // frozen). This is a no-op (owned_names stays None) for the large
+    // majority of targets that don't use extends: at all.
+    let overlay_path = workspace_path.join(OVERLAY_CONFIG_FILE);
+    let owned_names: Option<HashSet<String>> = match config::load_config(&config_path) {
+        Ok(raw_primary) if raw_primary.extends.is_some() => {
+            let overlay = if overlay_path.exists() {
+                match dsdk_cli::overlay::load_overlay_config(&overlay_path) {
+                    Ok(overlay) => overlay,
+                    Err(e) => {
+                        messages::error(&format!("Error loading overlay.yml: {}", e));
+                        return;
+                    }
+                }
+            } else {
+                dsdk_cli::overlay::OverlayConfig::default()
+            };
+            let mut names = HashSet::new();
+            if let Some(gits_overlay) = &overlay.gits {
+                names.extend(gits_overlay.add.iter().map(|g| g.name.clone()));
+                names.extend(gits_overlay.modify.iter().map(|p| p.name.clone()));
+            }
+            messages::status(&format!(
+                "This target extends '{}': release only affects the {} git(s) \
+                 owned by this target's own overlay.yml; inherited gits are \
+                 released independently by the base target.",
+                raw_primary.extends.unwrap().target,
+                names.len()
+            ));
+            Some(names)
+        }
+        Ok(_) => None,
         Err(e) => {
             messages::error(&format!("Error loading config: {}", e));
             return;
@@ -135,6 +179,20 @@ pub(crate) fn handle_release_command(
         }
 
         for git_cfg in &sdk_config.gits {
+            // If this target extends: a base, skip any git not owned by
+            // this target's own overlay.yml (it's managed by the base
+            // target's independent release instead).
+            if let Some(ref owned) = owned_names {
+                if !owned.contains(&git_cfg.name) {
+                    messages::info(&format!(
+                        "Skipping {} (inherited from base target, not owned by this overlay)",
+                        git_cfg.name
+                    ));
+                    skipped_repos.push(git_cfg.name.clone());
+                    continue;
+                }
+            }
+
             // Check if this repository should be included (if include pattern is specified)
             if let Some(ref regex) = include_regex {
                 if !regex.is_match(&git_cfg.name) {
@@ -222,13 +280,34 @@ pub(crate) fn handle_release_command(
             messages::status("\nWould generate release configuration file");
         } else {
             messages::status("\nGenerating release configuration file...");
-            if let Err(e) = generate_release_config(
-                &config_path,
-                tag,
-                &include_regex,
-                &skipped_repos,
-                &tagged_repos,
-            ) {
+            let result = if owned_names.is_some() {
+                // extends: target -- freeze only this target's own
+                // overlay.yml (gits.add/gits.modify), leaving the base
+                // target's sdk.yml chain completely untouched.
+                if !overlay_path.exists() {
+                    messages::error(
+                        "This target extends: a base but has no overlay.yml with any \
+                         owned gits to freeze; nothing to release.",
+                    );
+                    return;
+                }
+                generate_release_overlay_config(
+                    &overlay_path,
+                    &workspace_path,
+                    tag,
+                    &skipped_repos,
+                    &tagged_repos,
+                )
+            } else {
+                generate_release_config(
+                    &config_path,
+                    tag,
+                    &include_regex,
+                    &skipped_repos,
+                    &tagged_repos,
+                )
+            };
+            if let Err(e) = result {
                 messages::error(&format!("Error generating release config: {}", e));
                 return;
             }
@@ -302,6 +381,7 @@ pub(crate) fn generate_release_config(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Read the original config file
     let original_content = std::fs::read_to_string(config_path)?;
+    let workspace_path = config_path.parent().unwrap();
 
     // Determine output filename based on the scenario
     let output_filename = match tag {
@@ -321,14 +401,87 @@ pub(crate) fn generate_release_config(
             "sdk_release.yml".to_string()
         }
     };
-    let output_path = config_path.parent().unwrap().join(&output_filename);
+    let output_path = workspace_path.join(&output_filename);
 
-    // Parse and modify the YAML content
+    let modified_content = freeze_gits_commits(
+        &original_content,
+        workspace_path,
+        tag,
+        skipped_repos,
+        tagged_repos,
+    );
+
+    // Write the modified content to the output file
+    std::fs::write(&output_path, modified_content)?;
+
+    messages::success(&format!(
+        "Generated release config: {}",
+        output_path.display()
+    ));
+    Ok(())
+}
+
+/// Generate a release overlay.yml for an `extends:` target: freezes commit
+/// hashes only for the gits this target's own overlay.yml owns
+/// (`gits.add`/`gits.modify`), leaving the base target's sdk.yml chain
+/// completely untouched. Reuses the same line-scanning approach as
+/// `generate_release_config` -- it works unmodified on overlay.yml's shape
+/// since `add:`/`modify:`/`remove:` sub-keys are just further-indented lines
+/// that don't affect the `gits:` section boundary or the `- name:`/`commit:`
+/// pair detection.
+pub(crate) fn generate_release_overlay_config(
+    overlay_path: &std::path::Path,
+    workspace_path: &std::path::Path,
+    tag: Option<&str>,
+    skipped_repos: &[String],
+    tagged_repos: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let original_content = std::fs::read_to_string(overlay_path)?;
+
+    let output_filename = match tag {
+        Some(tag_str) => {
+            let sanitized_tag =
+                tag_str.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '.'], "_");
+            format!("overlay_{}.yml", sanitized_tag)
+        }
+        None => "overlay_release.yml".to_string(),
+    };
+    let output_path = workspace_path.join(&output_filename);
+
+    let modified_content = freeze_gits_commits(
+        &original_content,
+        workspace_path,
+        tag,
+        skipped_repos,
+        tagged_repos,
+    );
+
+    std::fs::write(&output_path, modified_content)?;
+
+    messages::success(&format!(
+        "Generated release overlay: {}",
+        output_path.display()
+    ));
+    Ok(())
+}
+
+/// Line-scan `content` for a `gits:` section and freeze each entry's
+/// `commit:` value: to `tag` (if provided and the repo was actually tagged,
+/// or unconditionally when no include/exclude patterns were used), or
+/// otherwise to the repository's current commit hash. All other lines,
+/// comments, and formatting are preserved verbatim.
+fn freeze_gits_commits(
+    content: &str,
+    workspace_path: &Path,
+    tag: Option<&str>,
+    skipped_repos: &[String],
+    tagged_repos: &[String],
+) -> String {
     let mut modified_content = String::new();
     let mut in_gits_section = false;
     let mut current_git_name: Option<String> = None;
 
-    for line in original_content.lines() {
+    for line in content.lines() {
         let trimmed = line.trim();
 
         // Check if we're entering the gits section
@@ -374,28 +527,27 @@ pub(crate) fn generate_release_config(
                                 tag_str.to_string()
                             } else {
                                 // Get current commit hash for untagged repos
-                                get_current_commit_hash(
-                                    &config_path.parent().unwrap().join(git_name),
-                                )
-                                .unwrap_or_else(|| {
-                                    trimmed
-                                        .strip_prefix("commit:")
-                                        .unwrap_or("main")
-                                        .trim()
-                                        .to_string()
-                                })
+                                get_current_commit_hash(&workspace_path.join(git_name))
+                                    .unwrap_or_else(|| {
+                                        trimmed
+                                            .strip_prefix("commit:")
+                                            .unwrap_or("main")
+                                            .trim()
+                                            .to_string()
+                                    })
                             }
                         }
                     } else {
                         // genconfig-only mode: always get current commit hash
-                        get_current_commit_hash(&config_path.parent().unwrap().join(git_name))
-                            .unwrap_or_else(|| {
+                        get_current_commit_hash(&workspace_path.join(git_name)).unwrap_or_else(
+                            || {
                                 trimmed
                                     .strip_prefix("commit:")
                                     .unwrap_or("main")
                                     .trim()
                                     .to_string()
-                            })
+                            },
+                        )
                     };
                     modified_content.push_str(&format!(
                         "{}commit: {}",
@@ -416,14 +568,7 @@ pub(crate) fn generate_release_config(
         modified_content.push('\n');
     }
 
-    // Write the modified content to the output file
-    std::fs::write(&output_path, modified_content)?;
-
-    messages::success(&format!(
-        "Generated release config: {}",
-        output_path.display()
-    ));
-    Ok(())
+    modified_content
 }
 
 pub(crate) fn ensure_file_in_mirror(
@@ -1825,5 +1970,66 @@ copy_files:\n\
             !content.contains("sha256:"),
             "sha256 must not be inserted in dry_run mode"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // generate_release_overlay_config tests (extends:-scoped release)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_generate_release_overlay_config_freezes_only_owned_gits() {
+        let (_temp_dir, workspace_path) = create_test_workspace();
+
+        let overlay_content = r#"
+gits:
+  remove:
+    - mcuboot
+  add:
+    - name: drone-camera
+      url: https://example.com/camera.git
+      commit: main
+  modify:
+    - name: zephyr
+      commit: v4.4.0
+"#;
+        let overlay_path = workspace_path.join(OVERLAY_CONFIG_FILE);
+        fs::write(&overlay_path, overlay_content).expect("Failed to write overlay.yml");
+
+        let tagged_repos = vec!["drone-camera".to_string(), "zephyr".to_string()];
+        let skipped_repos = vec![];
+
+        let result = generate_release_overlay_config(
+            &overlay_path,
+            &workspace_path,
+            Some("v1.0.0"),
+            &skipped_repos,
+            &tagged_repos,
+        );
+        assert!(result.is_ok());
+
+        let output_path = workspace_path.join("overlay_v1_0_0.yml");
+        assert!(output_path.exists());
+        let content = fs::read_to_string(&output_path).expect("Failed to read output");
+
+        // Both owned gits (add + modify) got the tag frozen in.
+        assert!(content.contains("commit: v1.0.0"));
+        assert!(!content.contains("commit: main"));
+        assert!(!content.contains("commit: v4.4.0"));
+        // remove: list is untouched (still a plain string, no commit: line to freeze).
+        assert!(content.contains("mcuboot"));
+    }
+
+    #[test]
+    fn test_generate_release_overlay_config_genconfig_only_uses_output_name() {
+        let (_temp_dir, workspace_path) = create_test_workspace();
+
+        let overlay_content = "gits:\n  add:\n    - name: drone-camera\n      url: https://example.com/camera.git\n      commit: main\n";
+        let overlay_path = workspace_path.join(OVERLAY_CONFIG_FILE);
+        fs::write(&overlay_path, overlay_content).expect("Failed to write overlay.yml");
+
+        let result =
+            generate_release_overlay_config(&overlay_path, &workspace_path, None, &[], &[]);
+        assert!(result.is_ok());
+        assert!(workspace_path.join("overlay_release.yml").exists());
     }
 }
