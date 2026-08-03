@@ -12,16 +12,26 @@
 //! Data model and merge engine for the `extends:`/`overlay.yml` feature.
 //!
 //! A target's sdk.yml may declare `extends: <base-target>@<version>` to be
-//! based on another target. The actual add/remove/modify diff against that
-//! base lives in a sibling `overlay.yml` file (not in sdk.yml itself), using
-//! the shapes defined in this module. This module only implements the pure,
-//! in-memory merge logic; resolving `extends:` against a manifest source
-//! (network or local disk) lives in `init_cmd.rs`.
+//! based on another target. A derived target's own sdk.yml can freely define
+//! brand-new `gits:`/`toolchains:`/`copy_files:`/`install:` entries of its
+//! own -- these are merged with the base's list by simple concatenation (an
+//! entry whose name/dest collides with one already in the base is a hard
+//! error; use overlay.yml's `modify:` to change a base entry instead).
 //!
-//! Merge order for every list section is fixed: **remove -> modify -> add**.
-//! Every remove/modify reference must resolve to an existing entry, and
-//! every add must NOT already exist — both are hard errors, not warnings,
-//! to avoid silently masking manifest authoring mistakes.
+//! The sibling `overlay.yml` file is reserved for **remove:**/**modify:**
+//! operations against the fully merged (base + this target's own) content --
+//! it has no `add:` of its own; new entries always go directly in sdk.yml.
+//! This module only implements the pure, in-memory merge logic; resolving
+//! `extends:` against a manifest source (network or local disk) lives in
+//! `init_cmd.rs`.
+//!
+//! Merge order for every list section is fixed: **remove (from the base
+//! only) -> combine (base-after-removal + this target's own sdk.yml
+//! entries) -> modify (on the fully combined result)**. This order lets an
+//! overlay "replace" a base entry (remove it, then redefine an entry with
+//! the same name directly in sdk.yml) while still catching genuine name
+//! collisions as hard errors, and lets `modify:` reach either an inherited
+//! base entry or one of this target's own new entries.
 
 use crate::config::{
     deserialize_string_or_vec, CopyFileConfig, GitConfig, InstallConfig, SdkConfig, SdkConfigCore,
@@ -117,44 +127,40 @@ pub struct CopyFilePatch {
     pub symlink: Option<bool>,
 }
 
-/// Add/remove/modify diff for the `gits:` section of overlay.yml.
+/// remove/modify diff for the `gits:` section of overlay.yml. New gits go
+/// directly in the derived target's own sdk.yml instead.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct GitsOverlay {
-    #[serde(default)]
-    pub add: Vec<GitConfig>,
     #[serde(default)]
     pub remove: Vec<String>,
     #[serde(default)]
     pub modify: Vec<GitPatch>,
 }
 
-/// Add/remove/modify diff for the `toolchains:` section of overlay.yml.
+/// remove/modify diff for the `toolchains:` section of overlay.yml. New
+/// toolchains go directly in the derived target's own sdk.yml instead.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ToolchainsOverlay {
-    #[serde(default)]
-    pub add: Vec<ToolchainConfig>,
     #[serde(default)]
     pub remove: Vec<String>,
     #[serde(default)]
     pub modify: Vec<ToolchainPatch>,
 }
 
-/// Add/remove/modify diff for the `install:` section of overlay.yml.
+/// remove/modify diff for the `install:` section of overlay.yml. New
+/// install targets go directly in the derived target's own sdk.yml instead.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct InstallOverlay {
-    #[serde(default)]
-    pub add: Vec<InstallConfig>,
     #[serde(default)]
     pub remove: Vec<String>,
     #[serde(default)]
     pub modify: Vec<InstallPatch>,
 }
 
-/// Add/remove/modify diff for the `copy_files:` section of overlay.yml.
+/// remove/modify diff for the `copy_files:` section of overlay.yml. New
+/// entries go directly in the derived target's own sdk.yml instead.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct CopyFilesOverlay {
-    #[serde(default)]
-    pub add: Vec<CopyFileConfig>,
     #[serde(default)]
     pub remove: Vec<String>,
     #[serde(default)]
@@ -207,6 +213,31 @@ pub fn load_overlay_config<P: AsRef<Path>>(
 /// Find the index of the item whose `key_of` value matches `key`.
 fn position_by<T>(items: &[T], key: &str, key_of: impl Fn(&T) -> String) -> Option<usize> {
     items.iter().position(|item| key_of(item) == key)
+}
+
+/// Concatenate `base` with `own` (the derived target's own new sdk.yml
+/// entries), erroring if any `own` entry's identity collides with one
+/// already present -- silently shadowing a base entry is never allowed;
+/// use overlay.yml's `modify:` to change an existing entry instead.
+fn combine_with_own<T>(
+    base: Vec<T>,
+    own: Vec<T>,
+    key_of: impl Fn(&T) -> String,
+    kind: &str,
+) -> Result<Vec<T>, String> {
+    let mut result = base;
+    for item in own {
+        let key = key_of(&item);
+        if result.iter().any(|existing| key_of(existing) == key) {
+            return Err(format!(
+                "sdk.yml: cannot add {} '{}': already exists in the inherited base \
+                 content; use overlay.yml's modify: to change it instead",
+                kind, key
+            ));
+        }
+        result.push(item);
+    }
+    Ok(result)
 }
 
 fn apply_git_patch(target: &mut GitConfig, patch: &GitPatch) {
@@ -296,106 +327,95 @@ fn apply_copy_file_patch(target: &mut CopyFileConfig, patch: &CopyFilePatch) {
     }
 }
 
-/// Merge the `gits:` section: base list + overlay's remove/modify/add.
+/// Merge the `gits:` section. Order: overlay's `remove:` is applied to the
+/// base list first, then this target's own new gits (from its sdk.yml) are
+/// concatenated in (collision-checked against what's left of the base),
+/// then overlay's `modify:` is applied to the fully combined result -- so
+/// `modify:` can target either an inherited base entry or one of this
+/// target's own new entries.
 pub fn merge_gits(
     base: Vec<GitConfig>,
+    own: Vec<GitConfig>,
     overlay: Option<&GitsOverlay>,
 ) -> Result<Vec<GitConfig>, String> {
-    let mut result = base;
-    let Some(overlay) = overlay else {
-        return Ok(result);
-    };
-
-    for name in &overlay.remove {
-        match position_by(&result, name, |g| g.name.clone()) {
-            Some(idx) => {
-                result.remove(idx);
-            }
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot remove git '{}': not found in base",
-                    name
-                ))
+    let mut base = base;
+    if let Some(overlay) = overlay {
+        for name in &overlay.remove {
+            match position_by(&base, name, |g| g.name.clone()) {
+                Some(idx) => {
+                    base.remove(idx);
+                }
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot remove git '{}': not found in base",
+                        name
+                    ))
+                }
             }
         }
     }
 
-    for patch in &overlay.modify {
-        match position_by(&result, &patch.name, |g| g.name.clone()) {
-            Some(idx) => apply_git_patch(&mut result[idx], patch),
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot modify git '{}': not found (it may have \
-                     been removed by this overlay, or never existed in the base)",
-                    patch.name
-                ))
+    let mut result = combine_with_own(base, own, |g| g.name.clone(), "git")?;
+
+    if let Some(overlay) = overlay {
+        for patch in &overlay.modify {
+            match position_by(&result, &patch.name, |g| g.name.clone()) {
+                Some(idx) => apply_git_patch(&mut result[idx], patch),
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot modify git '{}': not found (it may have \
+                         been removed by this overlay, or never existed)",
+                        patch.name
+                    ))
+                }
             }
         }
-    }
-
-    for git in &overlay.add {
-        if position_by(&result, &git.name, |g| g.name.clone()).is_some() {
-            return Err(format!(
-                "overlay.yml: cannot add git '{}': already exists in base; use modify: instead",
-                git.name
-            ));
-        }
-        result.push(git.clone());
     }
 
     Ok(result)
 }
 
-/// Merge the `toolchains:` section: base list + overlay's remove/modify/add.
+/// Merge the `toolchains:` section. Same remove -> combine -> modify order
+/// as `merge_gits`, keyed by the toolchain's effective name
+/// (`ToolchainConfig::get_name()`).
 pub fn merge_toolchains(
     base: Option<Vec<ToolchainConfig>>,
+    own: Option<Vec<ToolchainConfig>>,
     overlay: Option<&ToolchainsOverlay>,
 ) -> Result<Option<Vec<ToolchainConfig>>, String> {
-    let mut result = base.unwrap_or_default();
-    let Some(overlay) = overlay else {
-        return Ok(if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        });
-    };
-
-    for name in &overlay.remove {
-        match position_by(&result, name, |t| t.get_name()) {
-            Some(idx) => {
-                result.remove(idx);
-            }
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot remove toolchain '{}': not found in base",
-                    name
-                ))
+    let mut base = base.unwrap_or_default();
+    if let Some(overlay) = overlay {
+        for name in &overlay.remove {
+            match position_by(&base, name, |t| t.get_name()) {
+                Some(idx) => {
+                    base.remove(idx);
+                }
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot remove toolchain '{}': not found in base",
+                        name
+                    ))
+                }
             }
         }
     }
 
-    for patch in &overlay.modify {
-        match position_by(&result, &patch.name, |t| t.get_name()) {
-            Some(idx) => apply_toolchain_patch(&mut result[idx], patch),
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot modify toolchain '{}': not found (it may \
-                     have been removed by this overlay, or never existed in the base)",
-                    patch.name
-                ))
+    let mut result =
+        combine_with_own(base, own.unwrap_or_default(), |t| t.get_name(), "toolchain")?;
+
+    if let Some(overlay) = overlay {
+        for patch in &overlay.modify {
+            match position_by(&result, &patch.name, |t| t.get_name()) {
+                Some(idx) => apply_toolchain_patch(&mut result[idx], patch),
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot modify toolchain '{}': not found (it may \
+                         have been removed by this overlay, or never existed)",
+                        patch.name
+                    ))
+                }
             }
         }
-    }
-
-    for toolchain in &overlay.add {
-        let name = toolchain.get_name();
-        if position_by(&result, &name, |t| t.get_name()).is_some() {
-            return Err(format!(
-                "overlay.yml: cannot add toolchain '{}': already exists in base; use modify: instead",
-                name
-            ));
-        }
-        result.push(toolchain.clone());
     }
 
     Ok(if result.is_empty() {
@@ -405,55 +425,50 @@ pub fn merge_toolchains(
     })
 }
 
-/// Merge the `install:` section: base list + overlay's remove/modify/add.
+/// Merge the `install:` section. Same remove -> combine -> modify order as
+/// `merge_gits`, keyed by `name`.
 pub fn merge_install(
     base: Option<Vec<InstallConfig>>,
+    own: Option<Vec<InstallConfig>>,
     overlay: Option<&InstallOverlay>,
 ) -> Result<Option<Vec<InstallConfig>>, String> {
-    let mut result = base.unwrap_or_default();
-    let Some(overlay) = overlay else {
-        return Ok(if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        });
-    };
-
-    for name in &overlay.remove {
-        match position_by(&result, name, |i| i.name.clone()) {
-            Some(idx) => {
-                result.remove(idx);
-            }
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot remove install target '{}': not found in base",
-                    name
-                ))
+    let mut base = base.unwrap_or_default();
+    if let Some(overlay) = overlay {
+        for name in &overlay.remove {
+            match position_by(&base, name, |i| i.name.clone()) {
+                Some(idx) => {
+                    base.remove(idx);
+                }
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot remove install target '{}': not found in base",
+                        name
+                    ))
+                }
             }
         }
     }
 
-    for patch in &overlay.modify {
-        match position_by(&result, &patch.name, |i| i.name.clone()) {
-            Some(idx) => apply_install_patch(&mut result[idx], patch),
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot modify install target '{}': not found (it \
-                     may have been removed by this overlay, or never existed in the base)",
-                    patch.name
-                ))
+    let mut result = combine_with_own(
+        base,
+        own.unwrap_or_default(),
+        |i| i.name.clone(),
+        "install target",
+    )?;
+
+    if let Some(overlay) = overlay {
+        for patch in &overlay.modify {
+            match position_by(&result, &patch.name, |i| i.name.clone()) {
+                Some(idx) => apply_install_patch(&mut result[idx], patch),
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot modify install target '{}': not found (it \
+                         may have been removed by this overlay, or never existed)",
+                        patch.name
+                    ))
+                }
             }
         }
-    }
-
-    for install in &overlay.add {
-        if position_by(&result, &install.name, |i| i.name.clone()).is_some() {
-            return Err(format!(
-                "overlay.yml: cannot add install target '{}': already exists in base; use modify: instead",
-                install.name
-            ));
-        }
-        result.push(install.clone());
     }
 
     Ok(if result.is_empty() {
@@ -463,56 +478,50 @@ pub fn merge_install(
     })
 }
 
-/// Merge the `copy_files:` section: base list + overlay's remove/modify/add,
-/// keyed by `dest`.
+/// Merge the `copy_files:` section. Same remove -> combine -> modify order
+/// as `merge_gits`, keyed by `dest`.
 pub fn merge_copy_files(
     base: Option<Vec<CopyFileConfig>>,
+    own: Option<Vec<CopyFileConfig>>,
     overlay: Option<&CopyFilesOverlay>,
 ) -> Result<Option<Vec<CopyFileConfig>>, String> {
-    let mut result = base.unwrap_or_default();
-    let Some(overlay) = overlay else {
-        return Ok(if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        });
-    };
-
-    for dest in &overlay.remove {
-        match position_by(&result, dest, |c| c.dest.clone()) {
-            Some(idx) => {
-                result.remove(idx);
-            }
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot remove copy_files entry '{}': not found in base",
-                    dest
-                ))
+    let mut base = base.unwrap_or_default();
+    if let Some(overlay) = overlay {
+        for dest in &overlay.remove {
+            match position_by(&base, dest, |c| c.dest.clone()) {
+                Some(idx) => {
+                    base.remove(idx);
+                }
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot remove copy_files entry '{}': not found in base",
+                        dest
+                    ))
+                }
             }
         }
     }
 
-    for patch in &overlay.modify {
-        match position_by(&result, &patch.dest, |c| c.dest.clone()) {
-            Some(idx) => apply_copy_file_patch(&mut result[idx], patch),
-            None => {
-                return Err(format!(
-                    "overlay.yml: cannot modify copy_files entry '{}': not found (it \
-                     may have been removed by this overlay, or never existed in the base)",
-                    patch.dest
-                ))
+    let mut result = combine_with_own(
+        base,
+        own.unwrap_or_default(),
+        |c| c.dest.clone(),
+        "copy_files entry",
+    )?;
+
+    if let Some(overlay) = overlay {
+        for patch in &overlay.modify {
+            match position_by(&result, &patch.dest, |c| c.dest.clone()) {
+                Some(idx) => apply_copy_file_patch(&mut result[idx], patch),
+                None => {
+                    return Err(format!(
+                        "overlay.yml: cannot modify copy_files entry '{}': not found (it \
+                         may have been removed by this overlay, or never existed)",
+                        patch.dest
+                    ))
+                }
             }
         }
-    }
-
-    for entry in &overlay.add {
-        if position_by(&result, &entry.dest, |c| c.dest.clone()).is_some() {
-            return Err(format!(
-                "overlay.yml: cannot add copy_files entry '{}': already exists in base; use modify: instead",
-                entry.dest
-            ));
-        }
-        result.push(entry.clone());
     }
 
     Ok(if result.is_empty() {
@@ -554,46 +563,30 @@ pub fn merge_variables(
 /// `overlay.yml`, producing the effective, in-memory `SdkConfig` for this
 /// level of the chain.
 ///
-/// List sections (gits/toolchains/install/copy_files) in `derived` must be
-/// empty — they are only allowed via `overlay.yml` when `extends:` is set.
-/// Scalar sections (build/test/clean/flash/envsetup/build_folder/
-/// makefile_include/direnv/phases) in `derived` override the corresponding
-/// value inherited from `base` when present.
+/// List sections (gits/toolchains/install/copy_files) in `derived` are the
+/// derived target's own new entries, merged with `base`'s list by
+/// concatenation (a name/dest collision with a base entry is a hard error;
+/// use overlay.yml's `modify:` to change a base entry instead). Scalar
+/// sections (build/test/clean/flash/envsetup/build_folder/makefile_include/
+/// direnv/phases) in `derived` override the corresponding value inherited
+/// from `base` when present.
 pub fn apply_overlay(
     base: SdkConfig,
     derived: SdkConfig,
     overlay: &OverlayConfig,
 ) -> Result<SdkConfig, String> {
-    if !derived.gits.is_empty() {
-        return Err(
-            "sdk.yml: 'gits:' must be empty when 'extends:' is set; add/remove/modify \
-             gits via overlay.yml instead"
-                .to_string(),
-        );
-    }
-    if derived.toolchains.as_ref().is_some_and(|v| !v.is_empty()) {
-        return Err(
-            "sdk.yml: 'toolchains:' must be empty when 'extends:' is set; use overlay.yml instead"
-                .to_string(),
-        );
-    }
-    if derived.install.as_ref().is_some_and(|v| !v.is_empty()) {
-        return Err(
-            "sdk.yml: 'install:' must be empty when 'extends:' is set; use overlay.yml instead"
-                .to_string(),
-        );
-    }
-    if derived.copy_files.as_ref().is_some_and(|v| !v.is_empty()) {
-        return Err(
-            "sdk.yml: 'copy_files:' must be empty when 'extends:' is set; use overlay.yml instead"
-                .to_string(),
-        );
-    }
-
-    let gits = merge_gits(base.gits, overlay.gits.as_ref())?;
-    let toolchains = merge_toolchains(base.toolchains, overlay.toolchains.as_ref())?;
-    let install = merge_install(base.install, overlay.install.as_ref())?;
-    let copy_files = merge_copy_files(base.copy_files, overlay.copy_files.as_ref())?;
+    let gits = merge_gits(base.gits, derived.gits, overlay.gits.as_ref())?;
+    let toolchains = merge_toolchains(
+        base.toolchains,
+        derived.toolchains,
+        overlay.toolchains.as_ref(),
+    )?;
+    let install = merge_install(base.install, derived.install, overlay.install.as_ref())?;
+    let copy_files = merge_copy_files(
+        base.copy_files,
+        derived.copy_files,
+        overlay.copy_files.as_ref(),
+    )?;
     let variables = merge_variables(base.variables, overlay.variables.as_ref())?;
 
     Ok(SdkConfig {
@@ -706,36 +699,47 @@ pub struct OwnedEntries {
 }
 
 /// Compute the set of entry identities (`name`, or `dest` for copy_files)
-/// added or modified by `overlay`, per section.
-pub fn compute_owned_entries(overlay: &OverlayConfig) -> OwnedEntries {
+/// owned by a derived target: its own new sdk.yml entries, plus anything
+/// its overlay.yml modifies (there's no `add:` in overlay.yml anymore --
+/// new entries always live directly in sdk.yml).
+pub fn compute_owned_entries(derived: &SdkConfig, overlay: &OverlayConfig) -> OwnedEntries {
     let mut owned = OwnedEntries::default();
 
+    owned
+        .gits
+        .extend(derived.gits.iter().map(|g| g.name.clone()));
     if let Some(gits) = &overlay.gits {
-        owned.gits.extend(gits.add.iter().map(|g| g.name.clone()));
         owned
             .gits
             .extend(gits.modify.iter().map(|p| p.name.clone()));
     }
-    if let Some(toolchains) = &overlay.toolchains {
+
+    if let Some(toolchains) = &derived.toolchains {
         owned
             .toolchains
-            .extend(toolchains.add.iter().map(|t| t.get_name()));
+            .extend(toolchains.iter().map(|t| t.get_name()));
+    }
+    if let Some(toolchains) = &overlay.toolchains {
         owned
             .toolchains
             .extend(toolchains.modify.iter().map(|p| p.name.clone()));
     }
+
+    if let Some(install) = &derived.install {
+        owned.install.extend(install.iter().map(|i| i.name.clone()));
+    }
     if let Some(install) = &overlay.install {
-        owned
-            .install
-            .extend(install.add.iter().map(|i| i.name.clone()));
         owned
             .install
             .extend(install.modify.iter().map(|p| p.name.clone()));
     }
-    if let Some(copy_files) = &overlay.copy_files {
+
+    if let Some(copy_files) = &derived.copy_files {
         owned
             .copy_files
-            .extend(copy_files.add.iter().map(|c| c.dest.clone()));
+            .extend(copy_files.iter().map(|c| c.dest.clone()));
+    }
+    if let Some(copy_files) = &overlay.copy_files {
         owned
             .copy_files
             .extend(copy_files.modify.iter().map(|p| p.dest.clone()));

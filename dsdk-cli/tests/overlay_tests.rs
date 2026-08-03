@@ -10,6 +10,13 @@
 // limitations under the License.
 
 //! Integration tests for the extends:/overlay.yml merge engine (dsdk_cli::overlay).
+//!
+//! Merge model: a derived target's own sdk.yml may freely define brand-new
+//! gits/toolchains/copy_files/install entries of its own, merged with the
+//! base's list by concatenation. overlay.yml only ever contains remove:/
+//! modify: (no add: -- new entries always live directly in sdk.yml). Merge
+//! order per section is: remove (from the base) -> combine (base-after-
+//! removal + this target's own entries) -> modify (on the combined result).
 
 mod common;
 
@@ -77,42 +84,46 @@ fn new_copy_file(dest: &str) -> CopyFileConfig {
 // ---------------------------------------------------------------------
 
 #[test]
-fn test_merge_gits_add() {
+fn test_merge_gits_own_entries_are_concatenated_with_base() {
     let base = create_complex_sdk_config().gits;
-    let overlay = GitsOverlay {
-        add: vec![new_git(
-            "drone-camera",
-            "https://example.com/camera.git",
-            "main",
-        )],
-        remove: vec![],
-        modify: vec![],
-    };
+    let own = vec![new_git(
+        "drone-camera",
+        "https://example.com/camera.git",
+        "main",
+    )];
 
-    let merged = merge_gits(base, Some(&overlay)).expect("merge should succeed");
+    let merged = merge_gits(base, own, None).expect("merge should succeed");
     assert_eq!(merged.len(), 4);
     assert!(merged.iter().any(|g| g.name == "drone-camera"));
 }
 
 #[test]
-fn test_merge_gits_remove() {
+fn test_merge_gits_own_entry_colliding_with_base_errors() {
+    let base = create_complex_sdk_config().gits;
+    let own = vec![new_git("middleware", "https://example.com/dup.git", "main")];
+
+    let err = merge_gits(base, own, None).unwrap_err();
+    assert!(err.contains("middleware"));
+    assert!(err.contains("already exists"));
+}
+
+#[test]
+fn test_merge_gits_overlay_remove() {
     let base = create_complex_sdk_config().gits;
     let overlay = GitsOverlay {
-        add: vec![],
         remove: vec!["application".to_string()],
         modify: vec![],
     };
 
-    let merged = merge_gits(base, Some(&overlay)).expect("merge should succeed");
+    let merged = merge_gits(base, vec![], Some(&overlay)).expect("merge should succeed");
     assert_eq!(merged.len(), 2);
     assert!(!merged.iter().any(|g| g.name == "application"));
 }
 
 #[test]
-fn test_merge_gits_modify_overrides_only_patched_fields() {
+fn test_merge_gits_overlay_modify_overrides_only_patched_fields() {
     let base = create_complex_sdk_config().gits;
     let overlay = GitsOverlay {
-        add: vec![],
         remove: vec![],
         modify: vec![GitPatch {
             name: "middleware".to_string(),
@@ -127,7 +138,7 @@ fn test_merge_gits_modify_overrides_only_patched_fields() {
         }],
     };
 
-    let merged = merge_gits(base, Some(&overlay)).expect("merge should succeed");
+    let merged = merge_gits(base, vec![], Some(&overlay)).expect("merge should succeed");
     let middleware = merged.iter().find(|g| g.name == "middleware").unwrap();
     assert_eq!(middleware.commit, "v2.0.0");
     // Unpatched fields preserved
@@ -139,24 +150,50 @@ fn test_merge_gits_modify_overrides_only_patched_fields() {
 }
 
 #[test]
-fn test_merge_gits_remove_missing_errors() {
+fn test_merge_gits_overlay_modify_can_target_own_new_entry() {
+    let base = create_complex_sdk_config().gits;
+    let own = vec![new_git(
+        "drone-camera",
+        "https://example.com/camera.git",
+        "main",
+    )];
+    let overlay = GitsOverlay {
+        remove: vec![],
+        modify: vec![GitPatch {
+            name: "drone-camera".to_string(),
+            url: None,
+            commit: Some("v1.2.3".to_string()),
+            build_depends_on: None,
+            git_depends_on: None,
+            build: None,
+            documentation_dir: None,
+            python_deps: None,
+            group: None,
+        }],
+    };
+
+    let merged = merge_gits(base, own, Some(&overlay)).expect("merge should succeed");
+    let camera = merged.iter().find(|g| g.name == "drone-camera").unwrap();
+    assert_eq!(camera.commit, "v1.2.3");
+}
+
+#[test]
+fn test_merge_gits_overlay_remove_missing_errors() {
     let base = create_complex_sdk_config().gits;
     let overlay = GitsOverlay {
-        add: vec![],
         remove: vec!["does-not-exist".to_string()],
         modify: vec![],
     };
 
-    let err = merge_gits(base, Some(&overlay)).unwrap_err();
+    let err = merge_gits(base, vec![], Some(&overlay)).unwrap_err();
     assert!(err.contains("does-not-exist"));
     assert!(err.contains("not found in base"));
 }
 
 #[test]
-fn test_merge_gits_modify_missing_errors() {
+fn test_merge_gits_overlay_modify_missing_errors() {
     let base = create_complex_sdk_config().gits;
     let overlay = GitsOverlay {
-        add: vec![],
         remove: vec![],
         modify: vec![GitPatch {
             name: "does-not-exist".to_string(),
@@ -171,49 +208,36 @@ fn test_merge_gits_modify_missing_errors() {
         }],
     };
 
-    let err = merge_gits(base, Some(&overlay)).unwrap_err();
+    let err = merge_gits(base, vec![], Some(&overlay)).unwrap_err();
     assert!(err.contains("does-not-exist"));
 }
 
 #[test]
-fn test_merge_gits_add_duplicate_errors() {
+fn test_merge_gits_remove_then_own_redefine_allows_replacement() {
+    // Removing a base entry and then defining a new sdk.yml entry with the
+    // same name (but different data) should succeed, since remove is
+    // applied to the base before combining with this target's own entries.
     let base = create_complex_sdk_config().gits;
+    let own = vec![new_git(
+        "middleware",
+        "https://example.com/replaced.git",
+        "main",
+    )];
     let overlay = GitsOverlay {
-        add: vec![new_git("middleware", "https://example.com/dup.git", "main")],
-        remove: vec![],
-        modify: vec![],
-    };
-
-    let err = merge_gits(base, Some(&overlay)).unwrap_err();
-    assert!(err.contains("middleware"));
-    assert!(err.contains("already exists"));
-}
-
-#[test]
-fn test_merge_gits_order_remove_then_add_allows_replacement() {
-    // Remove then add a git with the same name but different URL should
-    // succeed, proving remove is applied before the add-duplicate check.
-    let base = create_complex_sdk_config().gits;
-    let overlay = GitsOverlay {
-        add: vec![new_git(
-            "middleware",
-            "https://example.com/replaced.git",
-            "main",
-        )],
         remove: vec!["middleware".to_string()],
         modify: vec![],
     };
 
-    let merged = merge_gits(base, Some(&overlay)).expect("merge should succeed");
+    let merged = merge_gits(base, own, Some(&overlay)).expect("merge should succeed");
     let middleware = merged.iter().find(|g| g.name == "middleware").unwrap();
     assert_eq!(middleware.url, "https://example.com/replaced.git");
 }
 
 #[test]
-fn test_merge_gits_none_overlay_is_noop() {
+fn test_merge_gits_none_overlay_and_no_own_is_noop() {
     let base = create_complex_sdk_config().gits;
     let base_len = base.len();
-    let merged = merge_gits(base, None).expect("merge should succeed");
+    let merged = merge_gits(base, vec![], None).expect("merge should succeed");
     assert_eq!(merged.len(), base_len);
 }
 
@@ -222,10 +246,10 @@ fn test_merge_gits_none_overlay_is_noop() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn test_merge_toolchains_add_remove_modify() {
+fn test_merge_toolchains_own_remove_modify() {
     let base = Some(vec![new_toolchain("a"), new_toolchain("b")]);
+    let own = Some(vec![new_toolchain("c")]);
     let overlay = ToolchainsOverlay {
-        add: vec![new_toolchain("c")],
         remove: vec!["a".to_string()],
         modify: vec![ToolchainPatch {
             name: "b".to_string(),
@@ -241,7 +265,7 @@ fn test_merge_toolchains_add_remove_modify() {
         }],
     };
 
-    let merged = merge_toolchains(base, Some(&overlay))
+    let merged = merge_toolchains(base, own, Some(&overlay))
         .expect("merge should succeed")
         .unwrap();
     assert_eq!(merged.len(), 2);
@@ -251,15 +275,25 @@ fn test_merge_toolchains_add_remove_modify() {
     assert_eq!(patched.destination, "toolchains/patched");
 }
 
+#[test]
+fn test_merge_toolchains_own_collision_with_base_errors() {
+    let base = Some(vec![new_toolchain("a")]);
+    let own = Some(vec![new_toolchain("a")]);
+
+    let err = merge_toolchains(base, own, None).unwrap_err();
+    assert!(err.contains('a'));
+    assert!(err.contains("already exists"));
+}
+
 // ---------------------------------------------------------------------
 // install: merge tests
 // ---------------------------------------------------------------------
 
 #[test]
-fn test_merge_install_add_remove_modify() {
+fn test_merge_install_own_remove_modify() {
     let base = Some(vec![new_install("a", None), new_install("b", None)]);
+    let own = Some(vec![new_install("c", Some(vec!["b"]))]);
     let overlay = InstallOverlay {
-        add: vec![new_install("c", Some(vec!["b"]))],
         remove: vec!["a".to_string()],
         modify: vec![InstallPatch {
             name: "b".to_string(),
@@ -269,7 +303,7 @@ fn test_merge_install_add_remove_modify() {
         }],
     };
 
-    let merged = merge_install(base, Some(&overlay))
+    let merged = merge_install(base, own, Some(&overlay))
         .expect("merge should succeed")
         .unwrap();
     assert_eq!(merged.len(), 2);
@@ -284,13 +318,13 @@ fn test_merge_install_add_remove_modify() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn test_merge_copy_files_add_remove_modify() {
+fn test_merge_copy_files_own_remove_modify() {
     let base = Some(vec![
         new_copy_file("patches/a.patch"),
         new_copy_file("patches/b.patch"),
     ]);
+    let own = Some(vec![new_copy_file("patches/c.patch")]);
     let overlay = CopyFilesOverlay {
-        add: vec![new_copy_file("patches/c.patch")],
         remove: vec!["patches/a.patch".to_string()],
         modify: vec![CopyFilePatch {
             dest: "patches/b.patch".to_string(),
@@ -302,7 +336,7 @@ fn test_merge_copy_files_add_remove_modify() {
         }],
     };
 
-    let merged = merge_copy_files(base, Some(&overlay))
+    let merged = merge_copy_files(base, own, Some(&overlay))
         .expect("merge should succeed")
         .unwrap();
     assert_eq!(merged.len(), 2);
@@ -316,12 +350,11 @@ fn test_merge_copy_files_add_remove_modify() {
 fn test_merge_copy_files_remove_missing_errors() {
     let base = Some(vec![new_copy_file("patches/a.patch")]);
     let overlay = CopyFilesOverlay {
-        add: vec![],
         remove: vec!["patches/missing.patch".to_string()],
         modify: vec![],
     };
 
-    let err = merge_copy_files(base, Some(&overlay)).unwrap_err();
+    let err = merge_copy_files(base, None, Some(&overlay)).unwrap_err();
     assert!(err.contains("patches/missing.patch"));
 }
 
@@ -368,18 +401,18 @@ fn test_merge_variables_remove_missing_errors() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn test_apply_overlay_merges_lists_and_overrides_scalars() {
+fn test_apply_overlay_merges_own_entries_and_overrides_scalars() {
     let base = create_complex_sdk_config();
     let mut derived = create_minimal_sdk_config();
     derived.build_folder = Some("custom-build".to_string());
+    derived.gits = vec![new_git(
+        "drone-camera",
+        "https://example.com/camera.git",
+        "main",
+    )];
 
     let overlay = OverlayConfig {
         gits: Some(GitsOverlay {
-            add: vec![new_git(
-                "drone-camera",
-                "https://example.com/camera.git",
-                "main",
-            )],
             remove: vec!["application".to_string()],
             modify: vec![],
         }),
@@ -398,14 +431,14 @@ fn test_apply_overlay_merges_lists_and_overrides_scalars() {
 }
 
 #[test]
-fn test_apply_overlay_rejects_gits_directly_in_derived_sdk_yml() {
+fn test_apply_overlay_own_collision_with_base_errors() {
     let base = create_complex_sdk_config();
     let mut derived = create_minimal_sdk_config();
-    derived.gits = vec![new_git("not-allowed", "https://example.com/x.git", "main")];
+    derived.gits = vec![new_git("middleware", "https://example.com/x.git", "main")];
 
     let err = apply_overlay(base, derived, &OverlayConfig::default()).unwrap_err();
-    assert!(err.contains("gits:"));
-    assert!(err.contains("overlay.yml"));
+    assert!(err.contains("middleware"));
+    assert!(err.contains("already exists"));
 }
 
 #[test]
@@ -524,13 +557,18 @@ fn test_validate_dependencies_dangling_install_depends_on() {
 
 #[test]
 fn test_compute_owned_entries_across_all_sections() {
+    let mut derived = create_minimal_sdk_config();
+    derived.gits = vec![new_git(
+        "drone-camera",
+        "https://example.com/camera.git",
+        "main",
+    )];
+    derived.toolchains = Some(vec![new_toolchain("gcc-drone")]);
+    derived.install = Some(vec![new_install("overlay-greeting", None)]);
+    derived.copy_files = Some(vec![new_copy_file("patches/drone.patch")]);
+
     let overlay = OverlayConfig {
         gits: Some(GitsOverlay {
-            add: vec![new_git(
-                "drone-camera",
-                "https://example.com/camera.git",
-                "main",
-            )],
             remove: vec!["mcuboot".to_string()],
             modify: vec![GitPatch {
                 name: "zephyr".to_string(),
@@ -544,13 +582,8 @@ fn test_compute_owned_entries_across_all_sections() {
                 group: None,
             }],
         }),
-        toolchains: Some(ToolchainsOverlay {
-            add: vec![new_toolchain("gcc-drone")],
-            remove: vec![],
-            modify: vec![],
-        }),
+        toolchains: None,
         install: Some(InstallOverlay {
-            add: vec![],
             remove: vec![],
             modify: vec![InstallPatch {
                 name: "protoc".to_string(),
@@ -559,17 +592,14 @@ fn test_compute_owned_entries_across_all_sections() {
                 commands: None,
             }],
         }),
-        copy_files: Some(CopyFilesOverlay {
-            add: vec![new_copy_file("patches/drone.patch")],
-            remove: vec![],
-            modify: vec![],
-        }),
+        copy_files: None,
         variables: None,
     };
 
-    let owned = compute_owned_entries(&overlay);
+    let owned = compute_owned_entries(&derived, &overlay);
 
-    assert_eq!(owned.gits.len(), 2); // drone-camera (add) + zephyr (modify)
+    // Own new gits + overlay-modified gits are both "owned".
+    assert_eq!(owned.gits.len(), 2);
     assert!(owned.gits.contains("drone-camera"));
     assert!(owned.gits.contains("zephyr"));
     assert!(!owned.gits.contains("mcuboot")); // remove: doesn't count as "owned"
@@ -577,7 +607,9 @@ fn test_compute_owned_entries_across_all_sections() {
     assert_eq!(owned.toolchains.len(), 1);
     assert!(owned.toolchains.contains("gcc-drone"));
 
-    assert_eq!(owned.install.len(), 1);
+    // Own new install target + overlay-modified install target.
+    assert_eq!(owned.install.len(), 2);
+    assert!(owned.install.contains("overlay-greeting"));
     assert!(owned.install.contains("protoc"));
 
     assert_eq!(owned.copy_files.len(), 1);
@@ -585,8 +617,9 @@ fn test_compute_owned_entries_across_all_sections() {
 }
 
 #[test]
-fn test_compute_owned_entries_default_overlay_is_empty() {
-    let owned = compute_owned_entries(&OverlayConfig::default());
+fn test_compute_owned_entries_default_overlay_and_minimal_derived_is_empty() {
+    let derived = create_minimal_sdk_config();
+    let owned = compute_owned_entries(&derived, &OverlayConfig::default());
     assert!(owned.gits.is_empty());
     assert!(owned.toolchains.is_empty());
     assert!(owned.install.is_empty());

@@ -79,10 +79,11 @@ pub(crate) fn handle_release_command(
     // gits are already pinned via the explicit extends: version and are
     // released independently, under the base target's own scheme. A
     // derived target's release therefore only touches gits it actually
-    // owns: the ones added or modified by its own overlay.yml. Inherited,
-    // unmodified base gits are left completely untouched (not tagged, not
-    // frozen). This is a no-op (owned_names stays None) for the large
-    // majority of targets that don't use extends: at all.
+    // owns: the ones it added directly in its own sdk.yml, or modified via
+    // its own overlay.yml. Inherited, unmodified base gits are left
+    // completely untouched (not tagged, not frozen). This is a no-op
+    // (owned_names stays None) for the large majority of targets that
+    // don't use extends: at all.
     let overlay_path = workspace_path.join(OVERLAY_CONFIG_FILE);
     let extends_scope = match load_extends_owned_entries(&config_path, &workspace_path) {
         Ok(scope) => scope,
@@ -91,16 +92,18 @@ pub(crate) fn handle_release_command(
             return;
         }
     };
-    let owned_names: Option<HashSet<String>> = extends_scope.map(|(base_target, owned)| {
-        messages::status(&format!(
-            "This target extends '{}': release only affects the {} git(s) \
-             owned by this target's own overlay.yml; inherited gits are \
-             released independently by the base target.",
-            base_target,
-            owned.gits.len()
-        ));
-        owned.gits
-    });
+    let owned_names: Option<HashSet<String>> =
+        extends_scope.map(|(base_target, _raw_primary, owned)| {
+            messages::status(&format!(
+                "This target extends '{}': release only affects the {} git(s) \
+             owned by this target (added directly in its own sdk.yml, or \
+             modified via its own overlay.yml); inherited gits are released \
+             independently by the base target.",
+                base_target,
+                owned.gits.len()
+            ));
+            owned.gits
+        });
 
     // Helper function to convert multiple patterns into a combined regex
     let build_combined_regex = |patterns: &Vec<String>, pattern_type: &str| -> Option<Regex> {
@@ -264,36 +267,36 @@ pub(crate) fn handle_release_command(
             messages::status("\nWould generate release configuration file");
         } else {
             messages::status("\nGenerating release configuration file...");
-            let result = if owned_names.is_some() {
-                // extends: target -- freeze only this target's own
-                // overlay.yml (gits.add/gits.modify), leaving the base
-                // target's sdk.yml chain completely untouched.
-                if !overlay_path.exists() {
-                    messages::error(
-                        "This target extends: a base but has no overlay.yml with any \
-                         owned gits to freeze; nothing to release.",
-                    );
-                    return;
-                }
-                generate_release_overlay_config(
+            // Always freeze the primary sdk.yml's own gits: list. This is a
+            // no-op for a plain target's usual full gits list, and for an
+            // extends: target it freezes this target's own new entries
+            // (added directly in its own sdk.yml) -- either way, sdk.yml's
+            // own gits: list only ever contains entries this target owns.
+            if let Err(e) = generate_release_config(
+                &config_path,
+                tag,
+                &include_regex,
+                &skipped_repos,
+                &tagged_repos,
+            ) {
+                messages::error(&format!("Error generating release config: {}", e));
+                return;
+            }
+
+            // extends: target with an overlay.yml that modifies inherited
+            // base gits -- freeze those separately, leaving the base
+            // target's own sdk.yml chain completely untouched.
+            if owned_names.is_some() && overlay_path.exists() {
+                if let Err(e) = generate_release_overlay_config(
                     &overlay_path,
                     &workspace_path,
                     tag,
                     &skipped_repos,
                     &tagged_repos,
-                )
-            } else {
-                generate_release_config(
-                    &config_path,
-                    tag,
-                    &include_regex,
-                    &skipped_repos,
-                    &tagged_repos,
-                )
-            };
-            if let Err(e) = result {
-                messages::error(&format!("Error generating release config: {}", e));
-                return;
+                ) {
+                    messages::error(&format!("Error generating release overlay: {}", e));
+                    return;
+                }
             }
         }
     }
@@ -406,8 +409,13 @@ pub(crate) fn generate_release_config(
 }
 
 /// If the workspace's sdk.yml declares `extends:`, load its overlay.yml (if
-/// present) and return `(base_target_name, owned_entries)`. Returns `None`
-/// for a plain (non-extends) target -- the vast majority of workspaces.
+/// present) and return `(base_target_name, raw_primary_sdk_config,
+/// owned_entries)`. Returns `None` for a plain (non-extends) target -- the
+/// vast majority of workspaces. The raw primary config is returned too so
+/// callers can tell whether a given owned entry lives directly in this
+/// target's own sdk.yml (added there) or only in its overlay.yml
+/// (modified there) -- e.g. to decide which file to write a computed hash
+/// back into.
 ///
 /// Used by every command that must scope its effect (or its writes back to
 /// disk) to only what a derived target's own manifest actually controls:
@@ -415,10 +423,10 @@ pub(crate) fn generate_release_config(
 pub(crate) fn load_extends_owned_entries(
     config_path: &Path,
     workspace_path: &Path,
-) -> Result<Option<(String, dsdk_cli::overlay::OwnedEntries)>, String> {
+) -> Result<Option<(String, config::SdkConfig, dsdk_cli::overlay::OwnedEntries)>, String> {
     let raw_primary =
         config::load_config(config_path).map_err(|e| format!("Error loading config: {}", e))?;
-    let Some(extends) = raw_primary.extends else {
+    let Some(extends) = raw_primary.extends.clone() else {
         return Ok(None);
     };
 
@@ -430,19 +438,19 @@ pub(crate) fn load_extends_owned_entries(
         dsdk_cli::overlay::OverlayConfig::default()
     };
 
-    Ok(Some((
-        extends.target,
-        dsdk_cli::overlay::compute_owned_entries(&overlay_config),
-    )))
+    let owned = dsdk_cli::overlay::compute_owned_entries(&raw_primary, &overlay_config);
+    Ok(Some((extends.target, raw_primary, owned)))
 }
 
 /// Generate a release overlay.yml for an `extends:` target: freezes commit
-/// hashes only for the gits this target's own overlay.yml owns
-/// (`gits.add`/`gits.modify`), leaving the base target's sdk.yml chain
-/// completely untouched. Reuses the same line-scanning approach as
+/// hashes only for the gits this target's own overlay.yml modifies
+/// (`gits.modify:`), leaving the base target's sdk.yml chain completely
+/// untouched. (New gits an extends: target owns are added directly in its
+/// own sdk.yml, so those are frozen by `generate_release_config` on the
+/// primary sdk.yml instead.) Reuses the same line-scanning approach as
 /// `generate_release_config` -- it works unmodified on overlay.yml's shape
-/// since `add:`/`modify:`/`remove:` sub-keys are just further-indented lines
-/// that don't affect the `gits:` section boundary or the `- name:`/`commit:`
+/// since `modify:`/`remove:` sub-keys are just further-indented lines that
+/// don't affect the `gits:` section boundary or the `- name:`/`commit:`
 /// pair detection.
 pub(crate) fn generate_release_overlay_config(
     overlay_path: &std::path::Path,
@@ -879,9 +887,9 @@ pub(crate) fn handle_copy_files_hash_command(
     }
 
     // If this workspace extends: a base, only copy_files entries owned by
-    // this target's own overlay.yml can be updated in place here -- the
-    // base target's own entries are managed independently in the base's own
-    // manifest. write_target_path is where computed hashes get written back.
+    // this target (added directly in its own sdk.yml, or modified via its
+    // own overlay.yml) can be updated here -- the base target's own entries
+    // are managed independently in the base's own manifest.
     let extends_scope = match load_extends_owned_entries(&config_path, &workspace_path) {
         Ok(scope) => scope,
         Err(e) => {
@@ -889,18 +897,15 @@ pub(crate) fn handle_copy_files_hash_command(
             return;
         }
     };
-    let write_target_path = match &extends_scope {
-        Some((base_target, owned)) => {
-            messages::status(&format!(
-                "This target extends '{}': only the {} copy_files entry(ies) owned by \
-                 this target's own overlay.yml can be updated here.",
-                base_target,
-                owned.copy_files.len()
-            ));
-            workspace_path.join(OVERLAY_CONFIG_FILE)
-        }
-        None => config_path.clone(),
-    };
+    let overlay_path = workspace_path.join(OVERLAY_CONFIG_FILE);
+    if let Some((base_target, _, owned)) = &extends_scope {
+        messages::status(&format!(
+            "This target extends '{}': only the {} copy_files entry(ies) owned by \
+             this target can be updated here.",
+            base_target,
+            owned.copy_files.len()
+        ));
+    }
 
     // Resolve mirror from user config / built-in default.
     let mirror_path = resolve_mirror(None);
@@ -922,17 +927,31 @@ pub(crate) fn handle_copy_files_hash_command(
 
     for copy_file in copy_files {
         // Skip entries inherited from the base target: they aren't owned
-        // by this target's own overlay.yml, so there's nowhere here to
-        // write an updated hash back to.
-        if let Some((_, owned)) = &extends_scope {
-            if !owned.copy_files.contains(&copy_file.dest) {
-                messages::info(&format!(
-                    "Skipping {} (inherited from base target, not owned by this overlay)",
-                    copy_file.dest
-                ));
-                continue;
+        // by this target, so there's nowhere here to write an updated hash
+        // back to.
+        let write_target_path = match &extends_scope {
+            Some((_, raw_primary, owned)) => {
+                if !owned.copy_files.contains(&copy_file.dest) {
+                    messages::info(&format!(
+                        "Skipping {} (inherited from base target, not owned by this overlay)",
+                        copy_file.dest
+                    ));
+                    continue;
+                }
+                // Owned via sdk.yml's own new entry -> write there;
+                // otherwise it must be an overlay.yml modify: entry.
+                let is_own_in_sdk_yml = raw_primary
+                    .copy_files
+                    .as_ref()
+                    .is_some_and(|cfs| cfs.iter().any(|c| c.dest == copy_file.dest));
+                if is_own_in_sdk_yml {
+                    config_path.clone()
+                } else {
+                    overlay_path.clone()
+                }
             }
-        }
+            None => config_path.clone(),
+        };
 
         // Check if this file matches the filter (if provided)
         if let Some(filter) = file_filter {
@@ -1116,9 +1135,9 @@ pub(crate) fn handle_toolchains_hash_command(
     }
 
     // If this workspace extends: a base, only toolchain entries owned by
-    // this target's own overlay.yml can be updated in place here -- the
-    // base target's own entries are managed independently in the base's own
-    // manifest. write_target_path is where computed hashes get written back.
+    // this target (added directly in its own sdk.yml, or modified via its
+    // own overlay.yml) can be updated here -- the base target's own entries
+    // are managed independently in the base's own manifest.
     let extends_scope = match load_extends_owned_entries(&config_path, &workspace_path) {
         Ok(scope) => scope,
         Err(e) => {
@@ -1126,18 +1145,15 @@ pub(crate) fn handle_toolchains_hash_command(
             return;
         }
     };
-    let write_target_path = match &extends_scope {
-        Some((base_target, owned)) => {
-            messages::status(&format!(
-                "This target extends '{}': only the {} toolchain(s) owned by \
-                 this target's own overlay.yml can be updated here.",
-                base_target,
-                owned.toolchains.len()
-            ));
-            workspace_path.join(OVERLAY_CONFIG_FILE)
-        }
-        None => config_path.clone(),
-    };
+    let overlay_path = workspace_path.join(OVERLAY_CONFIG_FILE);
+    if let Some((base_target, _, owned)) = &extends_scope {
+        messages::status(&format!(
+            "This target extends '{}': only the {} toolchain(s) owned by this \
+             target can be updated here.",
+            base_target,
+            owned.toolchains.len()
+        ));
+    }
 
     let mirror_path = resolve_mirror(None);
 
@@ -1166,17 +1182,29 @@ pub(crate) fn handle_toolchains_hash_command(
         let name = toolchain.get_name();
 
         // Skip entries inherited from the base target: they aren't owned
-        // by this target's own overlay.yml, so there's nowhere here to
-        // write an updated hash back to.
-        if let Some((_, owned)) = &extends_scope {
-            if !owned.toolchains.contains(&name) {
-                messages::info(&format!(
-                    "Skipping {} (inherited from base target, not owned by this overlay)",
-                    name
-                ));
-                continue;
+        // by this target, so there's nowhere here to write an updated hash
+        // back to.
+        let write_target_path = match &extends_scope {
+            Some((_, raw_primary, owned)) => {
+                if !owned.toolchains.contains(&name) {
+                    messages::info(&format!(
+                        "Skipping {} (inherited from base target, not owned by this overlay)",
+                        name
+                    ));
+                    continue;
+                }
+                let is_own_in_sdk_yml = raw_primary
+                    .toolchains
+                    .as_ref()
+                    .is_some_and(|tcs| tcs.iter().any(|t| t.get_name() == name));
+                if is_own_in_sdk_yml {
+                    config_path.clone()
+                } else {
+                    overlay_path.clone()
+                }
             }
-        }
+            None => config_path.clone(),
+        };
 
         // Apply filter if provided
         if let Some(filter) = file_filter {
@@ -2139,19 +2167,27 @@ gits:
     fn test_load_extends_owned_entries_extends_with_overlay() {
         let (_temp_dir, workspace_path) = create_test_workspace();
         let config_path = workspace_path.join(SDK_CONFIG_FILE);
-        fs::write(&config_path, "gits: []\nextends: base-sdk\n").expect("Failed to write sdk.yml");
+        fs::write(
+            &config_path,
+            "extends: base-sdk\ngits:\n  - name: drone-camera\n    url: https://example.com/camera.git\n    commit: main\n",
+        )
+        .expect("Failed to write sdk.yml");
         let overlay_path = workspace_path.join(OVERLAY_CONFIG_FILE);
         fs::write(
             &overlay_path,
-            "gits:\n  add:\n    - name: drone-camera\n      url: https://example.com/camera.git\n      commit: main\n",
+            "gits:\n  modify:\n    - name: zephyr\n      commit: v4.5.0\n",
         )
         .expect("Failed to write overlay.yml");
 
-        let (base_target, owned) = load_extends_owned_entries(&config_path, &workspace_path)
-            .unwrap()
-            .expect("should detect extends");
+        let (base_target, _raw_primary, owned) =
+            load_extends_owned_entries(&config_path, &workspace_path)
+                .unwrap()
+                .expect("should detect extends");
         assert_eq!(base_target, "base-sdk");
+        // Owned via sdk.yml's own new gits: entry.
         assert!(owned.gits.contains("drone-camera"));
+        // Owned via overlay.yml's modify:.
+        assert!(owned.gits.contains("zephyr"));
     }
 
     #[test]
@@ -2161,9 +2197,10 @@ gits:
         fs::write(&config_path, "gits: []\nextends: base-sdk\n").expect("Failed to write sdk.yml");
         // No overlay.yml written -- should still succeed, with empty owned entries.
 
-        let (base_target, owned) = load_extends_owned_entries(&config_path, &workspace_path)
-            .unwrap()
-            .expect("should detect extends");
+        let (base_target, _raw_primary, owned) =
+            load_extends_owned_entries(&config_path, &workspace_path)
+                .unwrap()
+                .expect("should detect extends");
         assert_eq!(base_target, "base-sdk");
         assert!(owned.gits.is_empty());
     }

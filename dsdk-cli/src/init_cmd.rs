@@ -171,19 +171,6 @@ pub(crate) fn handle_add_command(name: &str, url: &str, commit: &str) {
         }
     };
 
-    // This workspace's sdk.yml is based on another target via extends:, so
-    // gits: must be expressed through overlay.yml (rule enforced by
-    // overlay::apply_overlay), not written directly into sdk.yml.
-    if let Some(extends) = &sdk_config.extends {
-        messages::error(&format!(
-            "This workspace's sdk.yml extends '{}'; 'cim add' cannot write directly \
-             into sdk.yml's gits: list here.",
-            extends.target
-        ));
-        messages::error("Add the new git via overlay.yml's gits.add: section by hand instead.");
-        return;
-    }
-
     // Check for duplicate by name
     if sdk_config.gits().iter().any(|g| g.name == name) {
         messages::info(&format!(
@@ -736,13 +723,14 @@ fn resolve_extends_chain_from_source_inner(
         overlay::OverlayConfig::default()
     };
 
-    // Same rewriting as above, but for copy_files entries added/modified by
-    // an ancestor's own overlay.yml (only relevant when this level isn't
-    // the primary target).
+    // Same rewriting as above, but for copy_files entries modified by an
+    // ancestor's own overlay.yml (only relevant when this level isn't the
+    // primary target). New entries no longer go through overlay.yml's add:
+    // -- they live directly in that ancestor's own sdk.yml, already handled
+    // by the `derived.copy_files` rewrite above.
     if !is_primary {
         if let Some(copy_files_overlay) = &mut overlay_config.copy_files {
             let ancestor_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-            resolve_local_copy_file_sources(&mut copy_files_overlay.add, ancestor_dir);
             for patch in &mut copy_files_overlay.modify {
                 if let Some(source) = &patch.source {
                     if !is_url(source) && !Path::new(source).is_absolute() {
@@ -2460,11 +2448,12 @@ gits:
         write_target(
             &root,
             "drone-target",
-            "gits: []\nextends: platform-sdk\n",
+            "gits:\n  \
+             - name: drone-camera\n    url: https://example.com/camera.git\n    commit: main\n\
+             extends: platform-sdk\n",
             Some(
                 "gits:\n  \
                  remove:\n    - mcuboot\n  \
-                 add:\n    - name: drone-camera\n      url: https://example.com/camera.git\n      commit: main\n  \
                  modify:\n    - name: zephyr\n      commit: v4.5.0\n",
             ),
         );
@@ -2607,13 +2596,50 @@ gits:
     }
 
     #[test]
-    fn test_resolve_extends_chain_rejects_gits_in_derived_sdk_yml() {
+    fn test_resolve_extends_chain_derived_sdk_yml_own_gits_are_merged() {
         let (_temp_dir, root) = create_test_workspace();
-        write_target(&root, "base-target", "gits: []\n", None);
+        write_target(
+            &root,
+            "base-target",
+            "gits:\n  - name: base-repo\n    url: https://example.com/base.git\n    commit: main\n",
+            None,
+        );
+        write_target(
+            &root,
+            "derived-target",
+            "extends: base-target\ngits:\n  - name: own-repo\n    url: https://example.com/x.git\n    commit: main\n",
+            None,
+        );
+
+        let config_path = resolve_target_config("derived-target", &root).expect("should resolve");
+        let sources = vec![root.to_string_lossy().to_string()];
+        let resolution =
+            resolve_extends_chain_from_source(&config_path, "derived-target", &sources)
+                .expect("own gits should merge with the base's, not error");
+
+        let names: Vec<&str> = resolution
+            .merged
+            .gits
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect();
+        assert!(names.contains(&"base-repo"));
+        assert!(names.contains(&"own-repo"));
+    }
+
+    #[test]
+    fn test_resolve_extends_chain_own_git_colliding_with_base_errors() {
+        let (_temp_dir, root) = create_test_workspace();
+        write_target(
+            &root,
+            "base-target",
+            "gits:\n  - name: shared-repo\n    url: https://example.com/base.git\n    commit: main\n",
+            None,
+        );
         write_target(
             &root,
             "bad-derived",
-            "extends: base-target\ngits:\n  - name: not-allowed\n    url: https://example.com/x.git\n    commit: main\n",
+            "extends: base-target\ngits:\n  - name: shared-repo\n    url: https://example.com/x.git\n    commit: main\n",
             None,
         );
 
@@ -2621,6 +2647,7 @@ gits:
         let sources = vec![root.to_string_lossy().to_string()];
         let err =
             resolve_extends_chain_from_source(&config_path, "bad-derived", &sources).unwrap_err();
-        assert!(err.contains("overlay.yml"));
+        assert!(err.contains("shared-repo"));
+        assert!(err.contains("already exists"));
     }
 }
