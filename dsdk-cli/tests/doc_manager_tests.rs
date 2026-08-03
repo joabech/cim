@@ -55,6 +55,7 @@ fn create_git_config(name: &str, documentation_dir: Option<String>) -> GitConfig
         build: None,
         documentation_dir,
         python_deps: None,
+        group: None,
     }
 }
 

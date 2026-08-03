@@ -47,6 +47,7 @@ fn test_load_config_with_repositories() {
             build: Some(vec!["make".to_string()]),
             documentation_dir: None,
             python_deps: None,
+            group: None,
         },
         GitConfig {
             name: "repo2".to_string(),
@@ -57,6 +58,7 @@ fn test_load_config_with_repositories() {
             build: None,
             documentation_dir: None,
             python_deps: None,
+            group: None,
         },
     ];
 
