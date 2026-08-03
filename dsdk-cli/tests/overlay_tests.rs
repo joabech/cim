@@ -377,12 +377,28 @@ fn test_merge_variables_set_and_remove() {
         remove: vec!["KEEP_ME".to_string()],
     };
 
-    let merged = merge_variables(Some(base), Some(&overlay))
+    let merged = merge_variables(Some(base), None, Some(&overlay))
         .expect("merge should succeed")
         .unwrap();
     assert_eq!(merged.get("ZEPHYR_BOARD"), Some(&"board-b".to_string()));
     assert_eq!(merged.get("NEW_VAR"), Some(&"new-value".to_string()));
     assert!(!merged.contains_key("KEEP_ME"));
+}
+
+#[test]
+fn test_merge_variables_own_upserts_base() {
+    let mut base = HashMap::new();
+    base.insert("ZEPHYR_BOARD".to_string(), "board-a".to_string());
+
+    let mut own = HashMap::new();
+    own.insert("ZEPHYR_BOARD".to_string(), "board-own".to_string());
+    own.insert("OWN_VAR".to_string(), "own-value".to_string());
+
+    let merged = merge_variables(Some(base), Some(own), None)
+        .expect("merge should succeed")
+        .unwrap();
+    assert_eq!(merged.get("ZEPHYR_BOARD"), Some(&"board-own".to_string()));
+    assert_eq!(merged.get("OWN_VAR"), Some(&"own-value".to_string()));
 }
 
 #[test]
@@ -392,7 +408,7 @@ fn test_merge_variables_remove_missing_errors() {
         remove: vec!["DOES_NOT_EXIST".to_string()],
     };
 
-    let err = merge_variables(None, Some(&overlay)).unwrap_err();
+    let err = merge_variables(None, None, Some(&overlay)).unwrap_err();
     assert!(err.contains("DOES_NOT_EXIST"));
 }
 

@@ -531,13 +531,19 @@ pub fn merge_copy_files(
     })
 }
 
-/// Merge the `variables:` section: `set` upserts keys, `remove` deletes an
-/// existing key (erroring if it doesn't exist).
+/// Merge the `variables:` section: `own` (the derived target's own sdk.yml
+/// `variables:`) upserts keys on top of `base`, then overlay.yml's `set`
+/// upserts keys and `remove` deletes an existing key (erroring if it
+/// doesn't exist).
 pub fn merge_variables(
     base: Option<HashMap<String, String>>,
+    own: Option<HashMap<String, String>>,
     overlay: Option<&VariablesOverlay>,
 ) -> Result<Option<HashMap<String, String>>, String> {
     let mut result = base.unwrap_or_default();
+    for (k, v) in own.unwrap_or_default() {
+        result.insert(k, v);
+    }
     if let Some(overlay) = overlay {
         for key in &overlay.remove {
             if result.remove(key).is_none() {
@@ -587,7 +593,11 @@ pub fn apply_overlay(
         derived.copy_files,
         overlay.copy_files.as_ref(),
     )?;
-    let variables = merge_variables(base.variables, overlay.variables.as_ref())?;
+    let variables = merge_variables(
+        base.variables,
+        derived.variables,
+        overlay.variables.as_ref(),
+    )?;
 
     Ok(SdkConfig {
         gits,
