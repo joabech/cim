@@ -22,12 +22,12 @@ use dsdk_cli::download::{copy_yaml_files_to_workspace, process_copy_files};
 use dsdk_cli::workspace::{
     create_workspace_marker, download_config_from_url, expand_env_vars,
     expand_manifest_vars_in_config, get_all_sources_from_config, get_home_dir, is_url,
-    load_config_with_user_overrides, require_workspace_config, resolve_mirror,
-    resolve_target_config_from_git, CreateWorkspaceMarkerParams, OS_DEPS_FILE, PYTHON_DEPS_FILE,
-    SDK_CONFIG_FILE, WORKSPACE_MARKER_FILE,
+    load_config_with_extends, load_config_with_user_overrides, require_workspace_config,
+    resolve_mirror, resolve_target_config_from_git, CreateWorkspaceMarkerParams, OS_DEPS_FILE,
+    OVERLAY_CONFIG_FILE, PYTHON_DEPS_FILE, SDK_CONFIG_FILE, WORKSPACE_MARKER_FILE,
 };
 use dsdk_cli::{
-    config, doc_manager, git_operations, messages, toolchain_manager, vscode_tasks_manager,
+    config, doc_manager, git_operations, messages, overlay, toolchain_manager, vscode_tasks_manager,
 };
 use regex::Regex;
 use std::env;
@@ -56,7 +56,7 @@ pub(crate) fn handle_docs_command(docs_command: &DocsCommand) {
     }
 
     // For docs commands, we only need core config (git repos, mirror) - not os-dependencies
-    let sdk_config = match config::load_config(&config_path) {
+    let sdk_config = match load_config_with_extends(&config_path) {
         Ok(config) => config,
         Err(e) => {
             messages::error(&format!("Error loading config: {}", e));
@@ -171,6 +171,19 @@ pub(crate) fn handle_add_command(name: &str, url: &str, commit: &str) {
             return;
         }
     };
+
+    // This workspace's sdk.yml is based on another target via extends:, so
+    // gits: must be expressed through overlay.yml (rule enforced by
+    // overlay::apply_overlay), not written directly into sdk.yml.
+    if let Some(extends) = &sdk_config.extends {
+        messages::error(&format!(
+            "This workspace's sdk.yml extends '{}'; 'cim add' cannot write directly \
+             into sdk.yml's gits: list here.",
+            extends.target
+        ));
+        messages::error("Add the new git via overlay.yml's gits.add: section by hand instead.");
+        return;
+    }
 
     // Check for duplicate by name
     if sdk_config.gits().iter().any(|g| g.name == name) {
@@ -526,6 +539,156 @@ pub(crate) fn resolve_target_from_sources(
     Err(msg)
 }
 
+/// One target's file (sdk.yml or overlay.yml) that must be copied into the
+/// workspace, along with the destination filename it should get there. The
+/// primary (originally-requested) target always keeps the bare `sdk.yml`/
+/// `overlay.yml` names; every ancestor in an `extends:` chain gets a
+/// `<target>-sdk.yml` / `<target>-overlay.yml` name instead.
+#[derive(Debug)]
+pub(crate) struct TargetFilePair {
+    pub(crate) dest_name: String,
+    pub(crate) source_path: PathBuf,
+}
+
+/// Result of resolving a target's `extends:` chain against its manifest
+/// source(s): the fully merged, in-memory config (used for this init run's
+/// immediate actions), and the list of original files to copy into the
+/// workspace verbatim (nothing is ever flattened/serialized to disk).
+#[derive(Debug)]
+pub(crate) struct ExtendsResolution {
+    pub(crate) merged: config::SdkConfig,
+    pub(crate) files_to_copy: Vec<TargetFilePair>,
+}
+
+/// Maximum `extends:` chain depth, as a belt-and-braces safety net alongside
+/// cycle detection.
+const MAX_EXTENDS_DEPTH: usize = 20;
+
+/// Resolve a target's sdk.yml (and, if it declares `extends:`, its whole
+/// base chain) against its manifest source(s).
+///
+/// `config_path` must already point at a fetched/resolved sdk.yml for
+/// `target` (as produced by `resolve_target_config`/`resolve_target_from_sources`).
+/// `sources` is the list of manifest sources to search for ancestor targets
+/// that don't specify an explicit `extends.source` override.
+pub(crate) fn resolve_extends_chain_from_source(
+    config_path: &Path,
+    target: &str,
+    sources: &[String],
+) -> Result<ExtendsResolution, String> {
+    resolve_extends_chain_from_source_inner(
+        config_path,
+        target,
+        sources,
+        &mut std::collections::HashSet::new(),
+        0,
+    )
+}
+
+fn resolve_extends_chain_from_source_inner(
+    config_path: &Path,
+    target: &str,
+    sources: &[String],
+    visited: &mut std::collections::HashSet<String>,
+    depth: usize,
+) -> Result<ExtendsResolution, String> {
+    if depth > MAX_EXTENDS_DEPTH {
+        return Err(format!(
+            "extends: chain exceeds the maximum depth of {} (possible misconfiguration \
+             or unintended cycle involving target '{}')",
+            MAX_EXTENDS_DEPTH, target
+        ));
+    }
+
+    let derived = config::load_config(config_path)
+        .map_err(|e| format!("Failed to load config for target '{}': {}", target, e))?;
+
+    let is_primary = depth == 0;
+    let (sdk_dest_name, overlay_dest_name) = if is_primary {
+        (SDK_CONFIG_FILE.to_string(), OVERLAY_CONFIG_FILE.to_string())
+    } else {
+        (
+            format!("{}-{}", target, SDK_CONFIG_FILE),
+            format!("{}-{}", target, OVERLAY_CONFIG_FILE),
+        )
+    };
+
+    let Some(extends) = derived.extends.clone() else {
+        return Ok(ExtendsResolution {
+            merged: derived,
+            files_to_copy: vec![TargetFilePair {
+                dest_name: sdk_dest_name,
+                source_path: config_path.to_path_buf(),
+            }],
+        });
+    };
+
+    if !visited.insert(target.to_string()) {
+        return Err(format!(
+            "extends: cycle detected involving target '{}' (already visited: {})",
+            target,
+            visited.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    let base_sources: Vec<String> = match &extends.source {
+        Some(src) => vec![src.clone()],
+        None => sources.to_vec(),
+    };
+
+    let resolved_base = resolve_target_from_sources(
+        &extends.target,
+        extends.version.as_deref(),
+        &base_sources,
+        None,
+    )
+    .map_err(|e| {
+        format!(
+            "extends: failed to resolve base target '{}' (declared by '{}'): {}",
+            extends.target, target, e
+        )
+    })?;
+
+    let base_resolution = resolve_extends_chain_from_source_inner(
+        &resolved_base.config_path,
+        &extends.target,
+        &base_sources,
+        visited,
+        depth + 1,
+    )?;
+
+    let overlay_path = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(OVERLAY_CONFIG_FILE);
+    let overlay_config = if overlay_path.exists() {
+        overlay::load_overlay_config(&overlay_path)
+            .map_err(|e| format!("Failed to load overlay.yml for target '{}': {}", target, e))?
+    } else {
+        overlay::OverlayConfig::default()
+    };
+
+    let mut files_to_copy = vec![TargetFilePair {
+        dest_name: sdk_dest_name,
+        source_path: config_path.to_path_buf(),
+    }];
+    if overlay_path.exists() {
+        files_to_copy.push(TargetFilePair {
+            dest_name: overlay_dest_name,
+            source_path: overlay_path,
+        });
+    }
+    files_to_copy.extend(base_resolution.files_to_copy);
+
+    let merged = overlay::apply_overlay(base_resolution.merged, derived, &overlay_config)
+        .map_err(|e| format!("Failed to apply overlay for target '{}': {}", target, e))?;
+
+    Ok(ExtendsResolution {
+        merged,
+        files_to_copy,
+    })
+}
+
 /// Helper function to install OS dependencies during init if they exist
 /// This function is called by init --full to install OS packages before other components
 pub(crate) fn install_os_deps_if_available(
@@ -857,14 +1020,25 @@ pub(crate) fn handle_init_command(config: InitConfig) {
         config_path.display()
     ));
 
-    // Load and validate config
-    let mut sdk_config = match config::load_config(&config_path) {
-        Ok(config) => config,
-        Err(e) => {
-            messages::error(&format!("Failed to load config: {}", e));
-            return;
-        }
-    };
+    // Load and validate config, resolving extends:/overlay.yml against the
+    // manifest source(s) if the target declares extends:
+    let extends_resolution =
+        match resolve_extends_chain_from_source(&config_path, &config.target, &sources) {
+            Ok(resolution) => resolution,
+            Err(e) => {
+                messages::error(&format!("Failed to load config: {}", e));
+                return;
+            }
+        };
+    let mut sdk_config = extends_resolution.merged;
+
+    // Validate that build_depends_on/git_depends_on/install depends_on all
+    // resolve after merging the extends: chain (a no-op check when the
+    // target doesn't use extends: at all).
+    if let Err(e) = overlay::validate_dependencies(&sdk_config) {
+        messages::error(&e);
+        return;
+    }
 
     // Apply user config overrides if present
     if let Some(ref uc) = user_config {
@@ -1019,12 +1193,22 @@ pub(crate) fn handle_init_command(config: InitConfig) {
         return;
     }
 
-    // Copy config file to workspace as sdk.yml
-    let dest_config_path = workspace_path.join(SDK_CONFIG_FILE);
-    if let Err(e) = fs::copy(&config_path, &dest_config_path) {
-        messages::error(&format!("Error copying config to workspace: {}", e));
-        return;
+    // Copy config file(s) to workspace. For a plain (non-extends) target this
+    // is just sdk.yml, byte-for-byte, exactly as before. For an extends:
+    // target, every level of the chain is copied verbatim under its own
+    // name (sdk.yml/overlay.yml for the primary target, <target>-sdk.yml/
+    // <target>-overlay.yml for each ancestor) -- nothing is ever flattened.
+    for file_pair in &extends_resolution.files_to_copy {
+        let dest_path = workspace_path.join(&file_pair.dest_name);
+        if let Err(e) = fs::copy(&file_pair.source_path, &dest_path) {
+            messages::error(&format!(
+                "Error copying {} to workspace: {}",
+                file_pair.dest_name, e
+            ));
+            return;
+        }
     }
+    let dest_config_path = workspace_path.join(SDK_CONFIG_FILE);
     messages::verbose("Copied configuration to workspace as sdk.yml");
 
     // Determine if we should skip mirror (command line flag OR user config setting)
@@ -1197,7 +1381,7 @@ pub(crate) fn handle_init_command(config: InitConfig) {
             // Step 3: Generate Makefile and run install-all (original --install behavior)
             // First generate the Makefile
             let makefile_path = workspace_path.join("Makefile");
-            match config::load_config(&dest_config_path) {
+            match load_config_with_extends(&dest_config_path) {
                 Ok(sdk_config) => {
                     // Check if there are install sections before trying to run make install-all
                     let has_install_sections = sdk_config.install.is_some()
@@ -2183,5 +2367,128 @@ gits:
         let regex = super::compile_match_regex("lwip|adi").unwrap();
         assert!(regex.is_match("lwip"));
         assert!(regex.is_match("adi-sdk"));
+    }
+
+    // ---------------------------------------------------------------
+    // resolve_extends_chain_from_source tests (local, non-git sources)
+    // ---------------------------------------------------------------
+
+    /// Create a `targets/<name>/sdk.yml` (and optional overlay.yml) file
+    /// under `root`.
+    fn write_target(root: &Path, name: &str, sdk_yml: &str, overlay_yml: Option<&str>) {
+        let dir = root.join("targets").join(name);
+        fs::create_dir_all(&dir).expect("Failed to create target dir");
+        fs::write(dir.join(SDK_CONFIG_FILE), sdk_yml).expect("Failed to write sdk.yml");
+        if let Some(overlay) = overlay_yml {
+            fs::write(dir.join(OVERLAY_CONFIG_FILE), overlay).expect("Failed to write overlay.yml");
+        }
+    }
+
+    #[test]
+    fn test_resolve_extends_chain_non_extends_target_is_passthrough() {
+        let (_temp_dir, root) = create_test_workspace();
+        write_target(
+            &root,
+            "plain-target",
+            "gits:\n  - name: a\n    url: https://example.com/a.git\n    commit: main\n",
+            None,
+        );
+
+        let config_path = resolve_target_config("plain-target", &root).expect("should resolve");
+        let sources = vec![root.to_string_lossy().to_string()];
+        let resolution = resolve_extends_chain_from_source(&config_path, "plain-target", &sources)
+            .expect("should resolve non-extends target");
+
+        assert_eq!(resolution.merged.gits.len(), 1);
+        assert_eq!(resolution.files_to_copy.len(), 1);
+        assert_eq!(resolution.files_to_copy[0].dest_name, SDK_CONFIG_FILE);
+    }
+
+    #[test]
+    fn test_resolve_extends_chain_two_level_merges_and_names_files() {
+        let (_temp_dir, root) = create_test_workspace();
+        write_target(
+            &root,
+            "platform-sdk",
+            "gits:\n  \
+             - name: zephyr\n    url: https://example.com/zephyr.git\n    commit: v4.4.0\n  \
+             - name: mcuboot\n    url: https://example.com/mcuboot.git\n    commit: main\n",
+            None,
+        );
+        write_target(
+            &root,
+            "drone-target",
+            "gits: []\nextends: platform-sdk\n",
+            Some(
+                "gits:\n  \
+                 remove:\n    - mcuboot\n  \
+                 add:\n    - name: drone-camera\n      url: https://example.com/camera.git\n      commit: main\n  \
+                 modify:\n    - name: zephyr\n      commit: v4.5.0\n",
+            ),
+        );
+
+        let config_path = resolve_target_config("drone-target", &root).expect("should resolve");
+        let sources = vec![root.to_string_lossy().to_string()];
+        let resolution = resolve_extends_chain_from_source(&config_path, "drone-target", &sources)
+            .expect("should resolve extends chain");
+
+        let names: Vec<&str> = resolution
+            .merged
+            .gits
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect();
+        assert!(names.contains(&"zephyr"));
+        assert!(names.contains(&"drone-camera"));
+        assert!(!names.contains(&"mcuboot"));
+        let zephyr = resolution
+            .merged
+            .gits
+            .iter()
+            .find(|g| g.name == "zephyr")
+            .unwrap();
+        assert_eq!(zephyr.commit, "v4.5.0");
+
+        // primary target keeps bare filenames; the ancestor gets prefixed names.
+        let dest_names: Vec<&str> = resolution
+            .files_to_copy
+            .iter()
+            .map(|f| f.dest_name.as_str())
+            .collect();
+        assert!(dest_names.contains(&"sdk.yml"));
+        assert!(dest_names.contains(&"overlay.yml"));
+        assert!(dest_names.contains(&"platform-sdk-sdk.yml"));
+        assert!(!dest_names.contains(&"platform-sdk-overlay.yml")); // platform-sdk has no overlay.yml
+    }
+
+    #[test]
+    fn test_resolve_extends_chain_detects_cycle() {
+        let (_temp_dir, root) = create_test_workspace();
+        write_target(&root, "a-target", "gits: []\nextends: b-target\n", None);
+        write_target(&root, "b-target", "gits: []\nextends: a-target\n", None);
+
+        let config_path = resolve_target_config("a-target", &root).expect("should resolve");
+        let sources = vec![root.to_string_lossy().to_string()];
+        let err =
+            resolve_extends_chain_from_source(&config_path, "a-target", &sources).unwrap_err();
+        assert!(err.contains("cycle"));
+    }
+
+    #[test]
+    fn test_resolve_extends_chain_rejects_gits_in_derived_sdk_yml() {
+        let (_temp_dir, root) = create_test_workspace();
+        write_target(&root, "base-target", "gits: []\n", None);
+        write_target(
+            &root,
+            "bad-derived",
+            "extends: base-target\ngits:\n  - name: not-allowed\n    url: https://example.com/x.git\n    commit: main\n",
+            None,
+        );
+
+        let config_path = resolve_target_config("bad-derived", &root).expect("should resolve");
+        let sources = vec![root.to_string_lossy().to_string()];
+        let err =
+            resolve_extends_chain_from_source(&config_path, "bad-derived", &sources).unwrap_err();
+        assert!(err.contains("overlay.yml"));
     }
 }
