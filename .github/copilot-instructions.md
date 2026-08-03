@@ -3,6 +3,13 @@
 ## Project Context
 This project is a Rust-based SDK management tool designed to manage multiple git repositories that make up a dynamic SDK. The tool uses a config file, `sdk.yml` to define the repositories, their URLs, commits/tags, makefile targets, toolchains and dependencies. `sdk.yml` can be found in target specific folder in the git called cim-manifests.git by default, however manifests can live in any git, the name doesn't matter. `cim` supports local mirroring, delta updates, repository management (add/remove), documentation generation, release work, listing target and Docker integration. The project creates a CLI tool named `cim`. Overall the tool shares similarities with repo tool from Google and west from the Zephyr project.
 
+Two composition features let manifests avoid duplication:
+- **Repository groups**: each `gits:` entry can set `group: <name>` (or a
+  list of names); `init`/`update`/`foreach` accept `--include-group`/
+  `--exclude-group` (comma-separated) to filter which repos are acted on.
+  An entry with no `group:` implicitly belongs to `default`.
+- **`extends:`/`overlay.yml`**: see "Composing Manifests" below.
+
 ## Project and directory Structure
 .
 ├── README.md     : cim README file
@@ -21,13 +28,15 @@ This project is a Rust-based SDK management tool designed to manage multiple git
 ├── shared             : Shared yml-files and templates
 │   └── templates      : templates for documentation generation
 └── targets            : cim targets (initialized with the 'init' command)
-    ├── dummy1         : small and simple target for testing
-    └── optee-qemu-v8  : target for OP-TEE testing (somewhat large, fully open source)
+    ├── example         : small, fully open source target used in docs/demos
+    ├── overlay-example : demonstrates extends:/overlay.yml on top of 'example'
+    └── optee-qemu-v8   : target for OP-TEE testing (somewhat large, fully open source)
 
 - Each `targets` folder contains:
   - `sdk.yml`: Main manifest file in YAML that defines a project and the workspace it will create.
   - `os-dependencies.yml`: Lists required HOST OS/system dependencies.
   - `python-dependencies.yml`: Lists required Python dependencies
+  - `overlay.yml` (optional): only present when `sdk.yml` declares `extends: <base-target>`; holds the `remove:`/`modify:` diff against the base target's content (see "Composing Manifests" below).
   - All `*.yml` files can be symlinked to files in the shared folder and other locations if needed.
 - Default location on disk is `$HOME/devel/cim-manifests`
 - Legacy location `$HOME/devel/sdk-manager-manifests` is also checked automatically for backward compatibility
@@ -38,6 +47,7 @@ This project is a Rust-based SDK management tool designed to manage multiple git
 - `.workspace`: Workspace marker file created by init command for automatic workspace detection.
 - `Makefile`: Makefile created by `cim makefile` command for easy access to common targets.
 - `.vscode`: VCcode `tasks.json` also created when running `cim makefile`.
+- `sdk.yml`/`overlay.yml`/`os-dependencies.yml`/`python-dependencies.yml`: for a plain target these keep their bare names; for an `extends:` target, each ancestor level's own files are copied in alongside with a `<target>-` prefix (e.g. `example-sdk.yml`, `example-os-dependencies.yml`) -- see "Composing Manifests" below.
 
 ## WORKSPACE Variable and ${{ VAR }} Syntax
 
@@ -81,6 +91,49 @@ Key functions in `dsdk-cli/src/`:
   tokens against a caller-supplied variable map.
 - `workspace.rs` — `expand_env_vars()`: expands `$VAR`, `${VAR}`,
   `~/` from the host environment.
+
+## Composing Manifests: extends:/overlay.yml
+
+A target's `sdk.yml` can declare `extends: <base-target>` to build on
+top of another target instead of duplicating its whole manifest. All
+merge logic lives in `dsdk-cli/src/overlay.rs`; `cim init` never
+flattens the chain to disk -- every level's original files are copied
+into the workspace verbatim (see `TargetFilePair`/
+`discover_sibling_dep_files()`/`discover_dependency_files()` in
+`init_cmd.rs`/`workspace.rs`).
+
+- **`sdk.yml`** (any level, including the derived target itself): new
+  entries unique to that level go directly in the normal
+  `gits:`/`toolchains:`/`install:`/`copy_files:`/`variables:`
+  lists/maps, same as a target with no `extends:` at all.
+- **`overlay.yml`** (derived levels only): ONLY `remove:` and
+  `modify:` operations against content *inherited* from the base --
+  there is no `add:`. `OVERLAY_CONFIG_FILE` (`workspace.rs`) names
+  this file.
+
+`overlay::apply_overlay()` merges a base `SdkConfig` with a derived
+`SdkConfig` and its `OverlayConfig` per list section in a fixed order:
+**remove** (against base only) → **combine** (base-after-removal plus
+the derived target's own new entries, via `combine_with_own()`; a
+name/dest collision is a hard error) → **modify** (against the
+combined result). `merge_variables()` follows the same idea for the
+`variables:` map (own upserts base, then overlay `remove:`/`set:`).
+
+`overlay::compute_owned_entries()` determines, per section, which
+entry names belong to the derived target (either added directly in
+its own `sdk.yml` or referenced in its `overlay.yml`'s `modify:`).
+This powers scoping for `cim release` (only tags/freezes gits owned by
+the target) and `cim utils hash-copy-files`/`hash-toolchains` (writes
+each computed hash back to whichever file actually owns that entry --
+`sdk.yml` or `overlay.yml` -- see `load_extends_owned_entries()` in
+`release_cmd.rs`).
+
+`os-dependencies.yml`/`python-dependencies.yml` are per-level too, but
+simpler: never merged, just copied and processed independently at
+every level in the chain.
+
+See `targets/overlay-example` (extends `targets/example`) in
+cim-manifests for a full worked example.
 
 ## Cim Development Workflow
 - Use `make` or `make all` to build, test, lint, format, and install cim in one command.
