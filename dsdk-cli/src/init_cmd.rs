@@ -23,7 +23,7 @@ use dsdk_cli::workspace::{
     expand_manifest_vars_in_config, get_all_sources_from_config, get_home_dir, is_url,
     load_config_with_extends, load_config_with_user_overrides, require_workspace_config,
     resolve_mirror, resolve_target_config_from_git, CreateWorkspaceMarkerParams, OS_DEPS_FILE,
-    OVERLAY_CONFIG_FILE, PYTHON_DEPS_FILE, SDK_CONFIG_FILE, WORKSPACE_MARKER_FILE,
+    OVERLAYS_DIR, OVERLAY_CONFIG_FILE, PYTHON_DEPS_FILE, SDK_CONFIG_FILE, WORKSPACE_MARKER_FILE,
 };
 use dsdk_cli::{
     config, doc_manager, git_operations, messages, overlay, toolchain_manager, vscode_tasks_manager,
@@ -571,6 +571,7 @@ fn discover_sibling_dep_files(
             };
             pairs.push(TargetFilePair {
                 dest_name,
+                dest_subdir: ancestor_dest_subdir(is_primary),
                 source_path,
             });
         }
@@ -578,14 +579,27 @@ fn discover_sibling_dep_files(
     pairs
 }
 
+/// `Some(workspace::OVERLAYS_DIR)` for an extends: ancestor's file, `None`
+/// for the primary target's own (bare-named, workspace-root) file.
+fn ancestor_dest_subdir(is_primary: bool) -> Option<&'static str> {
+    if is_primary {
+        None
+    } else {
+        Some(OVERLAYS_DIR)
+    }
+}
+
 /// One target's file (sdk.yml or overlay.yml) that must be copied into the
-/// workspace, along with the destination filename it should get there. The
-/// primary (originally-requested) target always keeps the bare `sdk.yml`/
-/// `overlay.yml` names; every ancestor in an `extends:` chain gets a
-/// `<target>-sdk.yml` / `<target>-overlay.yml` name instead.
+/// workspace, along with the destination filename/subfolder it should get
+/// there. The primary (originally-requested) target always keeps the bare
+/// `sdk.yml`/`overlay.yml` names at the workspace root; every ancestor in an
+/// `extends:` chain gets a `<target>-sdk.yml` / `<target>-overlay.yml` name
+/// instead, placed under the `.cim/target-overlays/` subfolder
+/// (`workspace::OVERLAYS_DIR`).
 #[derive(Debug)]
 pub(crate) struct TargetFilePair {
     pub(crate) dest_name: String,
+    pub(crate) dest_subdir: Option<&'static str>,
     pub(crate) source_path: PathBuf,
 }
 
@@ -669,6 +683,7 @@ fn resolve_extends_chain_from_source_inner(
     let Some(extends) = derived.extends.clone() else {
         let mut files_to_copy = vec![TargetFilePair {
             dest_name: sdk_dest_name,
+            dest_subdir: ancestor_dest_subdir(is_primary),
             source_path: config_path.to_path_buf(),
         }];
         files_to_copy.extend(discover_sibling_dep_files(config_path, target, is_primary));
@@ -744,11 +759,13 @@ fn resolve_extends_chain_from_source_inner(
 
     let mut files_to_copy = vec![TargetFilePair {
         dest_name: sdk_dest_name,
+        dest_subdir: ancestor_dest_subdir(is_primary),
         source_path: config_path.to_path_buf(),
     }];
     if overlay_path.exists() {
         files_to_copy.push(TargetFilePair {
             dest_name: overlay_dest_name,
+            dest_subdir: ancestor_dest_subdir(is_primary),
             source_path: overlay_path,
         });
     }
@@ -1226,10 +1243,27 @@ pub(crate) fn handle_init_command(config: InitConfig) {
     // Copy config file(s) to workspace. For a plain (non-extends) target this
     // is just sdk.yml, byte-for-byte, exactly as before. For an extends:
     // target, every level of the chain is copied verbatim under its own
-    // name (sdk.yml/overlay.yml for the primary target, <target>-sdk.yml/
-    // <target>-overlay.yml for each ancestor) -- nothing is ever flattened.
+    // name: sdk.yml/overlay.yml (and os/python deps files) for the primary
+    // target at the workspace root, <target>-sdk.yml/<target>-overlay.yml
+    // (and <target>-os/python-deps files) for each ancestor under the
+    // .cim/target-overlays/ subfolder -- nothing is ever flattened.
     for file_pair in &extends_resolution.files_to_copy {
-        let dest_path = workspace_path.join(&file_pair.dest_name);
+        let dest_dir = match file_pair.dest_subdir {
+            Some(subdir) => {
+                let dir = workspace_path.join(subdir);
+                if let Err(e) = fs::create_dir_all(&dir) {
+                    messages::error(&format!(
+                        "Error creating {} directory: {}",
+                        dir.display(),
+                        e
+                    ));
+                    return;
+                }
+                dir
+            }
+            None => workspace_path.clone(),
+        };
+        let dest_path = dest_dir.join(&file_pair.dest_name);
         if let Err(e) = fs::copy(&file_pair.source_path, &dest_path) {
             messages::error(&format!(
                 "Error copying {} to workspace: {}",
@@ -2480,7 +2514,8 @@ gits:
             .unwrap();
         assert_eq!(zephyr.commit, "v4.5.0");
 
-        // primary target keeps bare filenames; the ancestor gets prefixed names.
+        // primary target keeps bare filenames at the workspace root; the
+        // ancestor gets prefixed names under .cim/target-overlays/.
         let dest_names: Vec<&str> = resolution
             .files_to_copy
             .iter()
@@ -2490,6 +2525,21 @@ gits:
         assert!(dest_names.contains(&"overlay.yml"));
         assert!(dest_names.contains(&"platform-sdk-sdk.yml"));
         assert!(!dest_names.contains(&"platform-sdk-overlay.yml")); // platform-sdk has no overlay.yml
+
+        let primary_subdir = resolution
+            .files_to_copy
+            .iter()
+            .find(|f| f.dest_name == "sdk.yml")
+            .unwrap()
+            .dest_subdir;
+        assert_eq!(primary_subdir, None);
+        let ancestor_subdir = resolution
+            .files_to_copy
+            .iter()
+            .find(|f| f.dest_name == "platform-sdk-sdk.yml")
+            .unwrap()
+            .dest_subdir;
+        assert_eq!(ancestor_subdir, Some(OVERLAYS_DIR));
     }
 
     #[test]
@@ -2573,13 +2623,30 @@ gits:
             .map(|f| f.dest_name.as_str())
             .collect();
 
-        // Primary's own os-dependencies.yml keeps the bare name.
+        // Primary's own os-dependencies.yml keeps the bare name at the
+        // workspace root.
         assert!(dest_names.contains(&"os-dependencies.yml"));
         // Primary has no python-dependencies.yml of its own.
         assert!(!dest_names.contains(&"python-dependencies.yml"));
-        // Ancestor's files get the <target>-<file> prefix.
+        // Ancestor's files get the <target>-<file> prefix, destined for
+        // .cim/target-overlays/.
         assert!(dest_names.contains(&"base-sdk-os-dependencies.yml"));
         assert!(dest_names.contains(&"base-sdk-python-dependencies.yml"));
+
+        let primary_subdir = resolution
+            .files_to_copy
+            .iter()
+            .find(|f| f.dest_name == "os-dependencies.yml")
+            .unwrap()
+            .dest_subdir;
+        assert_eq!(primary_subdir, None);
+        let ancestor_subdir = resolution
+            .files_to_copy
+            .iter()
+            .find(|f| f.dest_name == "base-sdk-os-dependencies.yml")
+            .unwrap()
+            .dest_subdir;
+        assert_eq!(ancestor_subdir, Some(OVERLAYS_DIR));
     }
 
     #[test]
