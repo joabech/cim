@@ -594,7 +594,7 @@ fn ancestor_dest_subdir(is_primary: bool) -> Option<&'static str> {
 /// there. The primary (originally-requested) target always keeps the bare
 /// `sdk.yml`/`overlay.yml` names at the workspace root; every ancestor in an
 /// `extends:` chain gets a `<target>-sdk.yml` / `<target>-overlay.yml` name
-/// instead, placed under the `target-overlays/` subfolder
+/// instead, placed under the `.cim/target-overlays/` subfolder
 /// (`workspace::OVERLAYS_DIR`).
 #[derive(Debug)]
 pub(crate) struct TargetFilePair {
@@ -1246,7 +1246,7 @@ pub(crate) fn handle_init_command(config: InitConfig) {
     // name: sdk.yml/overlay.yml (and os/python deps files) for the primary
     // target at the workspace root, <target>-sdk.yml/<target>-overlay.yml
     // (and <target>-os/python-deps files) for each ancestor under the
-    // target-overlays/ subfolder -- nothing is ever flattened.
+    // .cim/target-overlays/ subfolder -- nothing is ever flattened.
     for file_pair in &extends_resolution.files_to_copy {
         let dest_dir = match file_pair.dest_subdir {
             Some(subdir) => {
@@ -2515,7 +2515,7 @@ gits:
         assert_eq!(zephyr.commit, "v4.5.0");
 
         // primary target keeps bare filenames at the workspace root; the
-        // ancestor gets prefixed names under target-overlays/.
+        // ancestor gets prefixed names under .cim/target-overlays/.
         let dest_names: Vec<&str> = resolution
             .files_to_copy
             .iter()
@@ -2629,7 +2629,7 @@ gits:
         // Primary has no python-dependencies.yml of its own.
         assert!(!dest_names.contains(&"python-dependencies.yml"));
         // Ancestor's files get the <target>-<file> prefix, destined for
-        // target-overlays/.
+        // .cim/target-overlays/.
         assert!(dest_names.contains(&"base-sdk-os-dependencies.yml"));
         assert!(dest_names.contains(&"base-sdk-python-dependencies.yml"));
 

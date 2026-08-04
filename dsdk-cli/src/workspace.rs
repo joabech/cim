@@ -27,17 +27,18 @@ pub const OS_DEPS_FILE: &str = "os-dependencies.yml";
 pub const PYTHON_DEPS_FILE: &str = "python-dependencies.yml";
 /// Filename for the workspace marker
 pub const WORKSPACE_MARKER_FILE: &str = ".workspace";
-/// Subfolder holding every `extends:` ancestor's own manifest/dependency
-/// files (`<target>-sdk.yml`, `<target>-overlay.yml`,
+/// Subfolder (nested under the existing `.cim/` cim-internal directory,
+/// alongside per-git venvs) holding every `extends:` ancestor's own
+/// manifest/dependency files (`<target>-sdk.yml`, `<target>-overlay.yml`,
 /// `<target>-os-dependencies.yml`, `<target>-python-dependencies.yml`),
 /// keeping the workspace root uncluttered with only the primary target's
 /// bare-named files.
-pub const OVERLAYS_DIR: &str = "target-overlays";
+pub const OVERLAYS_DIR: &str = ".cim/target-overlays";
 
 /// Discover every file matching `base_filename` for a workspace -- either
 /// the bare name at `workspace_path` root (the primary target's own file,
 /// e.g. `os-dependencies.yml`) or an ancestor-prefixed name
-/// (`<target>-os-dependencies.yml`) under `workspace_path/target-overlays/`,
+/// (`<target>-os-dependencies.yml`) under `workspace_path/.cim/target-overlays/`,
 /// copied in verbatim from an `extends:` ancestor by `cim init`, mirroring
 /// how `<target>-sdk.yml`/`<target>-overlay.yml` are named.
 ///
@@ -991,7 +992,7 @@ pub fn expand_manifest_vars(s: &str, vars: &std::collections::HashMap<String, St
 /// If the primary sdk.yml at `config_path` has no `extends:`, this behaves
 /// exactly like `config::load_config`. Otherwise, it follows the chain of
 /// `<target>-sdk.yml` / `<target>-overlay.yml` files that `cim init` already
-/// copied into the workspace's `target-overlays/` subfolder (no network
+/// copied into the workspace's `.cim/target-overlays/` subfolder (no network
 /// access, no source re-fetch — consistent with `cim update`'s existing
 /// "never re-fetch from source" behavior), merging bottom-up via the
 /// overlay engine, and validates dependency integrity once at the end.
@@ -1013,7 +1014,7 @@ pub fn load_config_with_extends(
 
 /// Recursively resolve `extends:` for a single already-loaded config,
 /// looking up ancestor files by naming convention under `dir`'s
-/// `target-overlays/` subfolder.
+/// `.cim/target-overlays/` subfolder.
 fn resolve_local_extends_chain(
     dir: &Path,
     sdk_file_name: &str,

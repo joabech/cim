@@ -1025,17 +1025,18 @@ original files are copied into the workspace verbatim so they stay
 independently recognizable and re-editable. The originally-requested
 target keeps the bare `sdk.yml`/`overlay.yml`/`os-dependencies.yml`/
 `python-dependencies.yml` names at the workspace root; each ancestor's
-own files are copied into a `target-overlays/` subfolder with a
-`<target>-` prefix (e.g. `target-overlays/example-sdk.yml`,
-`target-overlays/example-os-dependencies.yml`), keeping the workspace
-root uncluttered:
+own files are copied into a `.cim/target-overlays/` subfolder (nested
+under the same `.cim/` directory already used for per-git Python venvs)
+with a `<target>-` prefix (e.g. `.cim/target-overlays/example-sdk.yml`,
+`.cim/target-overlays/example-os-dependencies.yml`), keeping the
+workspace root uncluttered:
 
 ```bash
-ls $HOME/dsdk-overlay-example
+ls -a $HOME/dsdk-overlay-example
 # sdk.yml                  <- overlay-example's own manifest (extends: example)
 # overlay.yml               <- overlay-example's own remove/modify diff
 # os-dependencies.yml        <- overlay-example's own OS package list
-# target-overlays/
+# .cim/target-overlays/
 #   example-sdk.yml            <- example's original manifest, copied verbatim
 #   example-os-dependencies.yml <- example's own OS package list, copied verbatim
 ```

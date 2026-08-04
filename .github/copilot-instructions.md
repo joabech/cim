@@ -48,7 +48,7 @@ Two composition features let manifests avoid duplication:
 - `Makefile`: Makefile created by `cim makefile` command for easy access to common targets.
 - `.vscode`: VCcode `tasks.json` also created when running `cim makefile`.
 - `sdk.yml`/`overlay.yml`/`os-dependencies.yml`/`python-dependencies.yml`: the originally-requested (primary) target always keeps these bare names at the workspace root.
-- `target-overlays/`: only present for an `extends:` target; holds each ancestor level's own files, copied in with a `<target>-` prefix (e.g. `target-overlays/example-sdk.yml`, `target-overlays/example-os-dependencies.yml`) -- see "Composing Manifests" below.
+- `.cim/target-overlays/`: only present for an `extends:` target; holds each ancestor level's own files, copied in with a `<target>-` prefix (e.g. `.cim/target-overlays/example-sdk.yml`, `.cim/target-overlays/example-os-dependencies.yml`) -- see "Composing Manifests" below.
 
 ## WORKSPACE Variable and ${{ VAR }} Syntax
 
@@ -101,8 +101,9 @@ merge logic lives in `dsdk-cli/src/overlay.rs`; `cim init` never
 flattens the chain to disk -- every level's original files are copied
 into the workspace verbatim: the primary target's own files stay
 bare-named at the workspace root, every ancestor's files go into the
-`target-overlays/` subfolder (`OVERLAYS_DIR` in `workspace.rs`) under
-their `<target>-` prefixed name (see `TargetFilePair`/
+`.cim/target-overlays/` subfolder (`OVERLAYS_DIR` in `workspace.rs`,
+nested under the existing `.cim/` directory also used for per-git
+venvs) under their `<target>-` prefixed name (see `TargetFilePair`/
 `discover_sibling_dep_files()`/`discover_dependency_files()`/
 `resolve_local_extends_chain()` in `init_cmd.rs`/`workspace.rs`).
 
