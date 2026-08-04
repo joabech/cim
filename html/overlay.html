@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cim — extends: / overlay.yml / groups walkthrough</title>
+<meta name="description" content="Interactive walkthrough of cim's extends:/overlay.yml merge mechanism and --include-group/--exclude-group filtering.">
+<style>
+    :root {
+        --base: #1e1e2e; --mantle: #181825; --crust: #11111b;
+        --text: #cdd6f4; --subtext0: #a6adc8; --subtext1: #bac2de;
+        --overlay0: #6c7086; --overlay1: #9399b2; --surface0: #313244;
+        --surface1: #45475a; --surface2: #585b70; --blue: #89b4fa;
+        --lavender: #b4befe; --green: #a6e3a1; --yellow: #f9e2af;
+        --peach: #fab387; --red: #f38ba8; --pink: #f5c2e7; --mauve: #cba6f7;
+        --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+        --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        --radius: 10px;
+        /* Measured at runtime (updateStickyOffsets()) so sticky bars stack
+           exactly below one another regardless of actual rendered heights. */
+        --header-h: 50px;
+        --chain-h: 90px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: var(--font-sans); background: var(--base); color: var(--text); line-height: 1.6; }
+    .mono { font-family: var(--font-mono); }
+    a { color: var(--blue); }
+    .container { max-width: 1600px; width: 92%; margin: 0 auto; }
+
+    header.top { position: sticky; top: 0; z-index: 10; background: rgba(24,24,37,0.95); border-bottom: 1px solid var(--surface0); padding: 10px 0; }
+    header.top .container { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    header.top h1 { font-size: 16px; margin: 0; font-family: var(--font-mono); }
+    header.top nav { display: flex; gap: 18px; flex-wrap: wrap; }
+    header.top nav a { color: var(--subtext0); text-decoration: none; font-size: 13px; }
+    header.top nav a:hover { color: var(--text); }
+
+    section { padding: 28px 0; border-bottom: 1px solid var(--surface0); }
+    section h2 { font-family: var(--font-mono); font-size: 20px; margin: 0 0 6px; }
+    section .lede { color: var(--subtext0); font-size: 14px; margin-bottom: 14px; }
+    .rule-box { background: var(--mantle); border: 1px solid var(--surface0); border-left: 3px solid var(--blue); border-radius: var(--radius); padding: 10px 16px; font-size: 13.5px; color: var(--subtext1); margin-bottom: 14px; }
+    .rule-box b { color: var(--text); }
+
+    /* Chain diagram */
+    .chain-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+    .chain-box { background: var(--mantle); border: 2px solid var(--surface1); border-radius: var(--radius); padding: 10px 18px; cursor: pointer; font-family: var(--font-mono); font-size: 14px; text-align: center; min-width: 180px; transition: all 0.2s; }
+    .chain-box:hover { border-color: var(--surface2); }
+    .chain-box.active { border-color: var(--blue); background: var(--surface0); box-shadow: 0 0 0 3px rgba(137,180,250,0.15); }
+    .chain-box .depth { color: var(--overlay0); font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
+    .chain-arrow { color: var(--surface2); font-size: 20px; padding: 0 4px; }
+
+    /* Hover preview: shows a level's yaml while hovering its chain box,
+       without changing the actual selection rendered below. Pointer events
+       are only enabled while visible, so the mouse can travel from the box
+       straight into the popup (see cancelHide()/scheduleHide() in JS). */
+    .chain-preview { position: fixed; z-index: 100; width: 480px; max-width: 90vw; max-height: 70vh; overflow: auto;
+        background: var(--mantle); border: 1px solid var(--surface1); border-radius: var(--radius);
+        box-shadow: 0 16px 40px rgba(0,0,0,0.5); opacity: 0; pointer-events: none; transition: opacity 0.12s; }
+    .chain-preview.visible { opacity: 1; pointer-events: auto; }
+    .chain-preview .code-panel-header { padding: 6px 14px; background: var(--surface0); font-family: var(--font-mono); font-size: 12px; color: var(--subtext0); }
+    .chain-preview pre { margin: 0; padding: 12px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.45; color: var(--subtext1); white-space: pre; }
+
+    /* Sticky chain selector: stays pinned under the top nav for the rest of
+       the page (its containing block is .sticky-scope, which wraps every
+       section after #chain). */
+    .chain-sticky { position: sticky; top: var(--header-h); z-index: 9; background: var(--base); padding: 10px 0; border-bottom: 1px solid var(--surface0); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+    .chain-sticky .chain-row { margin-bottom: 0; flex-wrap: nowrap; overflow-x: auto; }
+
+    /* Section tabs: stack below the chain selector and stay pinned for the
+       rest of #merge (its containing block), unsticking once #effective begins. */
+    .section-tabs-sticky { position: sticky; top: calc(var(--header-h) + var(--chain-h)); z-index: 8; background: var(--base); padding: 8px 0; border-bottom: 1px solid var(--surface0); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+    .section-tabs-sticky .tab-row { margin-bottom: 0; }
+
+    /* Code panels */
+    .code-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 12px 0; }
+    .code-panels.single { grid-template-columns: 1fr; }
+    .code-panel { background: var(--mantle); border: 1px solid var(--surface0); border-radius: var(--radius); overflow: hidden; }
+    .code-panel-header { padding: 6px 14px; background: var(--surface0); font-family: var(--font-mono); font-size: 12px; color: var(--subtext0); display: flex; justify-content: space-between; }
+    .code-panel pre { margin: 0; padding: 12px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.45; color: var(--subtext1); overflow-x: auto; white-space: pre; }
+    .snippet-chunk { display: block; padding: 3px 8px; margin: 0 -8px; border-radius: 6px; transition: all 0.2s; }
+    .snippet-chunk.dim { opacity: 0.35; }
+    .snippet-chunk.active { opacity: 1; background: rgba(137,180,250,0.14); box-shadow: inset 3px 0 0 var(--blue); color: var(--text); }
+
+    /* Section tabs + stepper */
+    .tab-row, .stepper-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .tab-btn, .step-btn, .preset-btn { background: var(--surface0); border: 1px solid var(--surface1); color: var(--subtext1); font-family: var(--font-mono); font-size: 13px; padding: 6px 12px; border-radius: 8px; cursor: pointer; transition: all 0.15s; }
+    .tab-btn:hover, .step-btn:hover, .preset-btn:hover { border-color: var(--blue); color: var(--text); }
+    .tab-btn.active, .step-btn.active, .preset-btn.active { background: var(--blue); border-color: var(--blue); color: var(--crust); font-weight: 600; }
+    .step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--subtext0); margin: 0 0 10px; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+    /* Result list */
+    .entry-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+    .entry { background: var(--mantle); border: 1px solid var(--surface0); border-left: 4px solid var(--surface2); border-radius: 8px; padding: 7px 14px; font-size: 13.5px; transition: all 0.25s; }
+    .entry .row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .entry .name { font-family: var(--font-mono); font-weight: 600; color: var(--text); }
+    .entry .meta { color: var(--overlay1); font-size: 12px; }
+    .entry .badge { font-size: 10.5px; padding: 2px 7px; border-radius: 100px; background: var(--surface0); color: var(--subtext0); border: 1px solid var(--surface1); }
+    .entry .diff { margin-top: 6px; font-size: 12px; color: var(--yellow); font-family: var(--font-mono); }
+    .entry.state-base { border-left-color: var(--surface2); }
+    .entry.state-removed { border-left-color: var(--red); opacity: 0.55; text-decoration: line-through; }
+    .entry.state-added { border-left-color: var(--green); background: rgba(166,227,161,0.06); }
+    .entry.state-modified { border-left-color: var(--yellow); background: rgba(249,226,175,0.06); }
+    .entry.state-filtered-out { opacity: 0.3; }
+    .entry .group-chip { font-size: 10.5px; padding: 2px 7px; border-radius: 100px; background: var(--surface1); color: var(--lavender); }
+
+    .pending-note { font-size: 12px; color: var(--overlay0); margin: 6px 0 2px; font-style: italic; }
+
+    .footnote { font-size: 12px; color: var(--overlay0); margin-top: 8px; }
+
+    /* FAQ */
+    details.faq { background: var(--mantle); border: 1px solid var(--surface0); border-radius: 8px; padding: 2px 16px; margin-bottom: 8px; }
+    details.faq summary { cursor: pointer; padding: 10px 0; font-weight: 600; font-size: 14.5px; }
+    details.faq p { color: var(--subtext0); font-size: 14px; padding-bottom: 12px; margin: 0; }
+
+    footer { padding: 20px 0 32px; text-align: center; color: var(--overlay0); font-size: 13px; }
+
+    @media (max-width: 800px) {
+        .code-panels { grid-template-columns: 1fr; }
+    }
+</style>
+</head>
+<body>
+
+<header class="top">
+    <div class="container">
+        <h1>cim: extends / overlay / groups</h1>
+        <nav>
+            <a href="#intro">Intro</a>
+            <a href="#chain">Chain</a>
+            <a href="#merge">Merge steps</a>
+            <a href="#effective">Effective config</a>
+            <a href="#groups">Groups</a>
+            <a href="#faq">FAQ</a>
+        </nav>
+    </div>
+</header>
+
+<section id="intro">
+    <div class="container">
+        <h2>What this page shows</h2>
+        <p class="lede">A target's <code class="mono">sdk.yml</code> can declare <code class="mono">extends: &lt;base-target&gt;</code>
+        to build on top of another target instead of duplicating its whole manifest. The diff against the base lives in a sibling
+        <code class="mono">overlay.yml</code>. This page walks through a real 3-level chain from the
+        <a href="https://github.com/analogdevicesinc/cim" target="_blank">cim-manifests</a> repo:
+        <span class="mono">example → overlay-example → overlay-example-chain</span>.</p>
+        <div class="rule-box">
+            <b>Fixed rules:</b> a target's <code class="mono">extends:</code> only ever accepts a <b>single</b> base
+            (chain single-parent levels to combine more than one ancestor — there is no <code class="mono">extends: a,b</code> list form).
+            <code class="mono">overlay.yml</code> only ever holds <code class="mono">remove:</code>/<code class="mono">modify:</code> —
+            there is no <code class="mono">add:</code>; anything new goes directly into that level's own <code class="mono">sdk.yml</code> lists.
+            Removing/modifying an entry that doesn't exist in the inherited content is a hard error, not a silent no-op.
+            Merge order per section is always <b>remove → combine (base-after-removal + own new entries) → modify</b>.
+        </div>
+    </div>
+</section>
+
+<section id="chain">
+    <div class="container">
+        <h2>The extends: chain</h2>
+        <p class="lede">Click a level below to inspect its own <span class="mono">sdk.yml</span> additions and its
+        <span class="mono">overlay.yml</span> remove/modify diff further down the page. The selector stays pinned
+        under the nav bar as you scroll.</p>
+    </div>
+</section>
+
+<div class="sticky-scope">
+<div class="chain-sticky">
+    <div class="container">
+        <div class="chain-row" id="chainRow"></div>
+    </div>
+</div>
+<div class="chain-preview" id="chainPreview"></div>
+
+<section id="merge">
+    <div class="container">
+        <h2>Remove → Combine → Modify</h2>
+        <p class="lede">Pick a section, then step through how the selected level's overlay.yml is applied on top of
+        the fully-resolved result of its parent.</p>
+    </div>
+
+    <div class="section-tabs-sticky">
+        <div class="container">
+            <div class="tab-row" id="sectionTabs"></div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="code-panels" id="codePanels"></div>
+
+        <div class="legend">
+            <span><span class="swatch" style="background:var(--surface2)"></span> inherited</span>
+            <span><span class="swatch" style="background:var(--red)"></span> removed</span>
+            <span><span class="swatch" style="background:var(--green)"></span> added (own sdk.yml)</span>
+            <span><span class="swatch" style="background:var(--yellow)"></span> modified (overlay.yml)</span>
+        </div>
+        <div class="stepper-row" id="stepperRow"></div>
+        <div id="pendingNote"></div>
+        <div class="entry-list" id="mergeResult"></div>
+    </div>
+</section>
+
+<section id="effective">
+    <div class="container">
+        <h2>Effective merged config</h2>
+        <p class="lede">The fully merged <span class="mono">gits:</span> list for the currently selected level, after its
+        whole extends chain is resolved. Each entry is tagged with where it was <b>defined</b> and, if applicable, where it
+        was last <b>modified</b> via overlay.yml — this is the same provenance <code class="mono">cim release</code> uses to decide
+        whether to write a hash/freeze back to <span class="mono">sdk.yml</span> or <span class="mono">overlay.yml</span>.</p>
+        <div class="entry-list" id="effectiveResult"></div>
+    </div>
+</section>
+
+<section id="groups">
+    <div class="container">
+        <h2>--include-group / --exclude-group</h2>
+        <p class="lede">Filtering runs on the <b>fully merged</b> git list of <span class="mono">overlay-example-chain</span> (all
+        three levels combined) — group membership is cross-level, it doesn't matter which level originally added a repository.
+        A repo with no <span class="mono">group:</span> set implicitly belongs to the <span class="mono">"default"</span> group.</p>
+        <div class="rule-box footnote-marker">
+            Note: <span class="mono">group:</span> isn't used in the real example manifests today. The group tags below
+            (<span class="mono">core</span> / <span class="mono">drivers</span> / <span class="mono">tests</span>) were added
+            purely to demonstrate the filter — look for the <span class="mono">*</span> marker.
+        </div>
+        <div class="tab-row" id="groupPresets"></div>
+        <div class="mono" id="groupCommand" style="color:var(--peach); font-size:13px; margin-bottom:14px;"></div>
+        <div class="entry-list" id="groupResult"></div>
+    </div>
+</section>
+
+<section id="faq">
+    <div class="container">
+        <h2>FAQ</h2>
+        <details class="faq" open>
+            <summary>Can extends: target more than one base at once?</summary>
+            <p>No. <span class="mono">extends:</span> only ever accepts a single base target (shorthand string or the
+            structured <span class="mono">{target, version, source}</span> form). To combine content from more than one
+            target, chain single-parent levels: A extends B, B extends C, etc.</p>
+        </details>
+        <details class="faq">
+            <summary>What is overlay.yml allowed to do?</summary>
+            <p>Only <span class="mono">remove:</span> and <span class="mono">modify:</span> against content inherited from
+            the extends chain. There is no <span class="mono">add:</span> — new entries always go directly into that
+            level's own <span class="mono">sdk.yml</span> lists, exactly as they would in a target with no
+            <span class="mono">extends:</span> at all.</p>
+        </details>
+        <details class="faq">
+            <summary>What happens if overlay.yml removes/modifies something that doesn't exist?</summary>
+            <p>It's a hard error. Every <span class="mono">remove:</span>/<span class="mono">modify:</span> entry must
+            reference a name (or <span class="mono">dest:</span> for copy_files) that already exists in the combined
+            result — there's no silent no-op.</p>
+        </details>
+        <details class="faq">
+            <summary>How does extends: name@version get resolved?</summary>
+            <p>The shorthand form searches the same source list as the current target: <span class="mono">config.toml</span>'s
+            <span class="mono">default_source</span> then every <span class="mono">alternate_sources</span> entry, in order,
+            first match wins. Use the structured <span class="mono">{target, version, source}</span> form to restrict
+            resolution to one explicit source instead.</p>
+        </details>
+        <details class="faq">
+            <summary>Can I use a full URL as the extends: value?</summary>
+            <p>No — <span class="mono">target:</span> must stay a bare target name; cim always appends
+            <span class="mono">targets/&lt;target&gt;/sdk.yml</span> onto whatever <span class="mono">source</span>
+            resolves to. Put the URL in the structured form's <span class="mono">source:</span> field instead.</p>
+        </details>
+        <details class="faq">
+            <summary>Does --include-group only look at the target named on the command line?</summary>
+            <p>No — filtering runs on the fully merged git list (after the whole extends chain + overlay.yml is resolved),
+            so it spans every level, not just the primary target's own sdk.yml.</p>
+        </details>
+    </div>
+</section>
+
+<footer>
+    Demo data trimmed from cim-manifests <span class="mono">targets/example</span>,
+    <span class="mono">targets/overlay-example</span> and <span class="mono">targets/overlay-example-chain</span>.
+</footer>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    var KEY_FIELD = { gits: 'name', toolchains: 'name', copy_files: 'dest', install: 'name' };
+    var SECTIONS = ['gits', 'toolchains', 'copy_files', 'install'];
+
+    // ---- Demo data, trimmed from the real cim-manifests targets ----------
+    var LEVELS = [
+        {
+            key: 'example', label: 'example', extendsKey: null,
+            own: {
+                gits: [
+                    { name: 'git-sandbox', url: 'https://github.com/kevin-bates/git-sandbox.git', commit: 'master',
+                      build: '@echo "Building git-sandbox"', group: ['core'], origin: 'example' }
+                ],
+                toolchains: [
+                    { name: 'arm-gnu-toolchain-14.3.rel1-darwin-arm64-arm-none-eabi.tar.xz', os: 'darwin', arch: 'arm64', origin: 'example' },
+                    { name: 'arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi.tar.xz', os: 'linux', arch: 'x86_64', origin: 'example' },
+                    { name: 'arm-gnu-toolchain-14.3.rel1-aarch64-arm-none-eabi.tar.xz', os: 'linux', arch: 'arm64', origin: 'example' },
+                    { name: 'LLVM-22.1.1-macOS-ARM64.tar.xz', os: 'darwin', arch: 'arm64', origin: 'example' },
+                    { name: 'LLVM-22.1.1-Linux-X64.tar.xz', os: 'linux', arch: 'x86_64', origin: 'example' },
+                    { name: 'LLVM-22.1.1-Linux-ARM64.tar.xz', os: 'linux', arch: 'arm64', origin: 'example' },
+                    { name: 'sh.rustup.rs', os: '(rustup script)', arch: '-', origin: 'example' }
+                ],
+                copy_files: [
+                    { dest: 'extra.mk', source: 'extra.mk', origin: 'example' },
+                    { dest: 'src/', source: 'src/', origin: 'example' },
+                    { dest: 'CLAUDE.md', source: 'llm/CLAUDE.md', origin: 'example' },
+                    { dest: 'downloads/scopy-v2.1.0.zip', source: 'https://.../scopy-v2.1.0.zip', origin: 'example' }
+                ],
+                install: [
+                    { name: 'scopy', sentinel: 'opt/.scopy-installed', origin: 'example' }
+                ]
+            },
+            overlay: null,
+            sdkSnippet: [
+                { section: 'other', text: 'mirror: $HOME/tmp/mirror' },
+                { section: 'gits', text: [
+                    'gits:',
+                    '  - name: git-sandbox',
+                    '    url: https://github.com/kevin-bates/git-sandbox.git',
+                    '    commit: master',
+                    '    build: |',
+                    '      @echo "Building git-sandbox"',
+                    '    group: core   # illustrative, added for this demo'
+                ].join('\n') },
+                { section: 'copy_files', text: [
+                    'copy_files:',
+                    '  - source: extra.mk',
+                    '    dest: extra.mk',
+                    '  - source: src/',
+                    '    dest: src/',
+                    '  - source: llm/CLAUDE.md',
+                    '    dest: CLAUDE.md',
+                    '  - source: https://.../scopy-v2.1.0.zip',
+                    '    dest: downloads/scopy-v2.1.0.zip',
+                    '    cache: true',
+                    '    symlink: true'
+                ].join('\n') },
+                { section: 'install', text: [
+                    'install:',
+                    '  - name: scopy',
+                    '    sentinel: opt/.scopy-installed'
+                ].join('\n') },
+                { section: 'toolchains', text: [
+                    'toolchains:  # 6 arm-gnu/LLVM entries + rust (trimmed)',
+                    '  - url: https://sh.rustup.rs',
+                    '    destination: toolchains/rust'
+                ].join('\n') }
+            ],
+            overlaySnippet: null
+        },
+        {
+            key: 'overlay-example', label: 'overlay-example', extendsKey: 'example',
+            own: {
+                gits: [
+                    { name: 'hello-world', url: 'https://github.com/octocat/Hello-World.git', commit: 'master',
+                      build: '@echo "Building hello-world (added by overlay-example\'s own sdk.yml)"',
+                      group: ['drivers'], origin: 'overlay-example' }
+                ],
+                toolchains: [],
+                copy_files: [
+                    { dest: 'overlay-notes.txt', source: 'overlay-notes.txt', origin: 'overlay-example' }
+                ],
+                install: [
+                    { name: 'overlay-greeting', sentinel: 'opt/.overlay-greeting-installed', origin: 'overlay-example' }
+                ]
+            },
+            overlay: {
+                gits: { modify: [ { name: 'git-sandbox', build: '@echo "Building git-sandbox (build: overridden by overlay-example)"' } ] },
+                toolchains: { remove: ['sh.rustup.rs'] },
+                copy_files: { remove: ['downloads/scopy-v2.1.0.zip'] },
+                install: { remove: ['scopy'] }
+            },
+            sdkSnippet: [
+                { section: 'other', text: 'extends: example' },
+                { section: 'gits', text: [
+                    'gits:',
+                    '  - name: hello-world',
+                    '    url: https://github.com/octocat/Hello-World.git',
+                    '    commit: master',
+                    '    build: |',
+                    '      @echo "Building hello-world (added by overlay-example\'s own sdk.yml)"',
+                    '    group: drivers   # illustrative, added for this demo'
+                ].join('\n') },
+                { section: 'copy_files', text: [
+                    'copy_files:',
+                    '  - source: overlay-notes.txt',
+                    '    dest: overlay-notes.txt'
+                ].join('\n') },
+                { section: 'install', text: [
+                    'install:',
+                    '  - name: overlay-greeting',
+                    '    sentinel: opt/.overlay-greeting-installed',
+                    '    commands: |',
+                    '      echo "${{ OVERLAY_EXAMPLE_GREETING }}" > opt/overlay-greeting/README.txt'
+                ].join('\n') },
+                { section: 'other', text: [
+                    'variables:',
+                    '  OVERLAY_EXAMPLE_GREETING: "Hello from overlay-example!"'
+                ].join('\n') }
+            ],
+            overlaySnippet: [
+                { section: 'gits', text: [
+                    'gits:',
+                    '  modify:',
+                    '    - name: git-sandbox',
+                    '      build: |',
+                    '        @echo "Building git-sandbox (build: overridden by overlay-example)"'
+                ].join('\n') },
+                { section: 'toolchains', text: [
+                    'toolchains:',
+                    '  remove:',
+                    '    - sh.rustup.rs'
+                ].join('\n') },
+                { section: 'copy_files', text: [
+                    'copy_files:',
+                    '  remove:',
+                    '    - downloads/scopy-v2.1.0.zip'
+                ].join('\n') },
+                { section: 'install', text: [
+                    'install:',
+                    '  remove:',
+                    '    - scopy'
+                ].join('\n') }
+            ]
+        },
+        {
+            key: 'overlay-example-chain', label: 'overlay-example-chain', extendsKey: 'overlay-example',
+            own: {
+                gits: [
+                    { name: 'chain-note', url: 'https://github.com/octocat/Spoon-Knife.git', commit: 'main',
+                      build: '@echo "Building chain-note (added by overlay-example-chain\'s own sdk.yml)"',
+                      group: ['tests'], origin: 'overlay-example-chain' }
+                ],
+                toolchains: [],
+                copy_files: [
+                    { dest: 'chain-notes.txt', source: 'chain-notes.txt', origin: 'overlay-example-chain' }
+                ],
+                install: []
+            },
+            overlay: {
+                gits: { modify: [ { name: 'hello-world', build: '@echo "Building hello-world (build: overridden by overlay-example-chain)"' } ] },
+                toolchains: { remove: ['LLVM-22.1.1-Linux-X64.tar.xz'] },
+                copy_files: {},
+                install: {}
+            },
+            sdkSnippet: [
+                { section: 'other', text: 'extends: overlay-example' },
+                { section: 'gits', text: [
+                    'gits:',
+                    '  - name: chain-note',
+                    '    url: https://github.com/octocat/Spoon-Knife.git',
+                    '    commit: main',
+                    '    build: |',
+                    '      @echo "Building chain-note (added by overlay-example-chain\'s own sdk.yml)"',
+                    '    group: tests   # illustrative, added for this demo'
+                ].join('\n') },
+                { section: 'copy_files', text: [
+                    'copy_files:',
+                    '  - source: chain-notes.txt',
+                    '    dest: chain-notes.txt'
+                ].join('\n') }
+            ],
+            overlaySnippet: [
+                { section: 'gits', text: [
+                    'gits:',
+                    '  modify:',
+                    '    - name: hello-world',
+                    '      build: |',
+                    '        @echo "Building hello-world (build: overridden by overlay-example-chain)"'
+                ].join('\n') },
+                { section: 'toolchains', text: [
+                    'toolchains:',
+                    '  remove:',
+                    '    - LLVM-22.1.1-Linux-X64.tar.xz'
+                ].join('\n') }
+            ]
+        }
+    ];
+
+    function levelByKey(k) { return LEVELS.filter(function (l) { return l.key === k; })[0]; }
+
+    // ---- Merge engine, mirrors dsdk-cli/src/overlay.rs apply_overlay() ---
+    // order: remove (base only) -> combine (base-after-removal + own) -> modify.
+    function mergeSection(baseList, ownList, overlayOps, keyField, modifierKey) {
+        overlayOps = overlayOps || {};
+        var removeSet = {};
+        (overlayOps.remove || []).forEach(function (n) { removeSet[n] = true; });
+        var modifyList = overlayOps.modify || [];
+        var afterRemove = baseList.filter(function (item) { return !removeSet[item[keyField]]; });
+        var own = ownList.map(function (item) { return Object.assign({ _addedHere: true }, item); });
+        var combined = afterRemove.concat(own);
+        return combined.map(function (item) {
+            var patch = modifyList.filter(function (m) { return m[keyField] === item[keyField]; })[0];
+            if (!patch) return item;
+            var merged = Object.assign({}, item, patch);
+            merged._before = item;
+            merged.modifiedBy = modifierKey;
+            return merged;
+        });
+    }
+
+    function computeFinal(levelKey) {
+        var level = levelByKey(levelKey);
+        var result = {};
+        var parentFinal = level.extendsKey ? computeFinal(level.extendsKey) : null;
+        SECTIONS.forEach(function (section) {
+            var own = level.own[section] || [];
+            if (!level.extendsKey) { result[section] = own.slice(); return; }
+            var base = parentFinal[section];
+            var overlayOps = (level.overlay && level.overlay[section]) || {};
+            result[section] = mergeSection(base, own, overlayOps, KEY_FIELD[section], level.key);
+        });
+        return result;
+    }
+
+    // Stage: 0=Base, 1=Remove, 2=Combine, 3=Modify. Root level ignores stage.
+    function computeStage(levelKey, section, stage) {
+        var level = levelByKey(levelKey);
+        var keyField = KEY_FIELD[section];
+        if (!level.extendsKey) {
+            return { list: level.own[section].map(function (i) { return Object.assign({ _state: 'base' }, i); }), pending: [] };
+        }
+        var base = computeFinal(level.extendsKey)[section];
+        var own = level.own[section] || [];
+        var overlayOps = (level.overlay && level.overlay[section]) || {};
+        var removeSet = {};
+        (overlayOps.remove || []).forEach(function (n) { removeSet[n] = true; });
+        var modifyList = overlayOps.modify || [];
+
+        if (stage === 0) {
+            return { list: base.map(function (i) { return Object.assign({ _state: 'base' }, i); }), pending: own };
+        }
+        if (stage === 1) {
+            var list1 = base.map(function (i) {
+                return Object.assign({ _state: removeSet[i[keyField]] ? 'removed' : 'base' }, i);
+            });
+            return { list: list1, pending: own };
+        }
+        var kept = base.filter(function (i) { return !removeSet[i[keyField]]; });
+        var added = own.map(function (i) { return Object.assign({ _addedHere: true }, i); });
+        var combined = kept.concat(added);
+        if (stage === 2) {
+            var list2 = combined.map(function (i) {
+                return Object.assign({ _state: i._addedHere ? 'added' : 'base' }, i);
+            });
+            return { list: list2, pending: [] };
+        }
+        // stage 3: modify
+        var list3 = combined.map(function (i) {
+            var patch = modifyList.filter(function (m) { return m[keyField] === i[keyField]; })[0];
+            if (!patch) return Object.assign({ _state: i._addedHere ? 'added' : 'base' }, i);
+            var merged = Object.assign({}, i, patch, { _state: 'modified', _before: i });
+            return merged;
+        });
+        return { list: list3, pending: [] };
+    }
+
+    // ---- Rendering ---------------------------------------------------------
+    var activeLevel = 'example';
+    var activeSection = 'gits';
+    var activeStage = 3;
+
+    function el(tag, cls, html) {
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (html !== undefined) e.innerHTML = html;
+        return e;
+    }
+
+    function fieldSummary(item, section) {
+        if (section === 'gits') return item.url + ' @ ' + item.commit;
+        if (section === 'toolchains') return 'os: ' + item.os + ', arch: ' + item.arch;
+        if (section === 'copy_files') return item.source + ' → ' + item.dest;
+        if (section === 'install') return 'sentinel: ' + item.sentinel;
+        return '';
+    }
+
+    function diffCaption(item, section) {
+        if (!item._before) return '';
+        var keyField = KEY_FIELD[section];
+        var changed = [];
+        Object.keys(item).forEach(function (k) {
+            if (k === keyField || k.charAt(0) === '_' || k === 'modifiedBy' || k === 'origin') return;
+            var before = item._before[k];
+            var after = item[k];
+            if (JSON.stringify(before) !== JSON.stringify(after)) {
+                changed.push(k + ': "' + before + '" \u2192 "' + after + '"');
+            }
+        });
+        return changed.join(', ');
+    }
+
+    function renderEntry(item, section, extra) {
+        var entry = el('div', 'entry state-' + (item._state || 'base') + (extra && extra.filteredOut ? ' state-filtered-out' : ''));
+        var row1 = el('div', 'row1');
+        row1.appendChild(el('span', 'name', item[KEY_FIELD[section]]));
+        row1.appendChild(el('span', 'meta', fieldSummary(item, section)));
+        if (item.origin) row1.appendChild(el('span', 'badge', 'defined: ' + item.origin));
+        if (item.modifiedBy) row1.appendChild(el('span', 'badge', 'modified: ' + item.modifiedBy));
+        if (item.group && item.group.length) {
+            item.group.forEach(function (g) { row1.appendChild(el('span', 'group-chip', g + ' *')); });
+        }
+        entry.appendChild(row1);
+        var caption = diffCaption(item, section);
+        if (caption) entry.appendChild(el('div', 'diff', caption));
+        return entry;
+    }
+
+    function renderChain() {
+        var row = document.getElementById('chainRow');
+        row.innerHTML = '';
+        LEVELS.forEach(function (level, i) {
+            if (i > 0) row.appendChild(el('span', 'chain-arrow', '→'));
+            var box = el('div', 'chain-box mono' + (level.key === activeLevel ? ' active' : ''),
+                '<div class="depth">' + (level.extendsKey ? 'extends ' + level.extendsKey : 'base target') + '</div>' + level.label);
+            box.addEventListener('click', function () {
+                hideChainPreview();
+                activeLevel = level.key; activeStage = level.extendsKey ? 0 : 3; renderAll();
+            });
+            box.addEventListener('mouseenter', function () { cancelHidePreview(); showChainPreview(level, box); });
+            box.addEventListener('mouseleave', scheduleHidePreview);
+            row.appendChild(box);
+        });
+    }
+
+    // Hover preview: shows a level's own sdk.yml/overlay.yml (read-only,
+    // no section highlighting) without touching the actual selection below.
+    function showChainPreview(level, targetEl) {
+        var popup = document.getElementById('chainPreview');
+        popup.innerHTML = '';
+        popup.appendChild(el('div', 'code-panel-header', level.key + '/sdk.yml (own entries, trimmed)'));
+        var pre1 = el('pre');
+        pre1.textContent = level.sdkSnippet.map(function (c) { return c.text; }).join('\n\n');
+        popup.appendChild(pre1);
+        if (level.overlaySnippet) {
+            popup.appendChild(el('div', 'code-panel-header', level.key + '/overlay.yml (remove/modify, trimmed)'));
+            var pre2 = el('pre');
+            pre2.textContent = level.overlaySnippet.map(function (c) { return c.text; }).join('\n\n');
+            popup.appendChild(pre2);
+        }
+        popup.classList.add('visible');
+
+        var rect = targetEl.getBoundingClientRect();
+        popup.style.top = Math.min(rect.bottom + 8, window.innerHeight - 20) + 'px';
+        var left = Math.max(12, Math.min(rect.left, window.innerWidth - popup.offsetWidth - 12));
+        popup.style.left = left + 'px';
+    }
+
+    function hideChainPreview() {
+        document.getElementById('chainPreview').classList.remove('visible');
+    }
+
+    // Bridges the gap between the box and the popup: hide is delayed so the
+    // mouse can travel from one to the other without the popup flickering
+    // shut; entering either cancels the pending hide.
+    var previewHideTimer = null;
+    function scheduleHidePreview() {
+        previewHideTimer = setTimeout(hideChainPreview, 150);
+    }
+    function cancelHidePreview() {
+        if (previewHideTimer) { clearTimeout(previewHideTimer); previewHideTimer = null; }
+    }
+
+    // Renders a snippet's chunks into `pre`, dimming every chunk except the
+    // one matching activeSection so it's obvious which YAML lines drive the
+    // currently selected section tab.
+    function renderSnippetChunks(pre, chunks) {
+        pre.innerHTML = '';
+        chunks.forEach(function (chunk, idx) {
+            var span = el('span', 'snippet-chunk ' + (chunk.section === activeSection ? 'active' : 'dim'));
+            span.textContent = chunk.text;
+            pre.appendChild(span);
+            if (idx < chunks.length - 1) pre.appendChild(document.createTextNode('\n\n'));
+        });
+    }
+
+    function renderCodePanels() {
+        var level = levelByKey(activeLevel);
+        var wrap = document.getElementById('codePanels');
+        wrap.innerHTML = '';
+        wrap.className = 'code-panels' + (level.overlaySnippet ? '' : ' single');
+
+        var sdkPanel = el('div', 'code-panel');
+        sdkPanel.appendChild(el('div', 'code-panel-header', '<span>' + level.key + '/sdk.yml (own entries, trimmed)</span>'));
+        var sdkPre = el('pre');
+        sdkPanel.appendChild(sdkPre);
+        renderSnippetChunks(sdkPre, level.sdkSnippet);
+        wrap.appendChild(sdkPanel);
+
+        if (level.overlaySnippet) {
+            var ovPanel = el('div', 'code-panel');
+            ovPanel.appendChild(el('div', 'code-panel-header', '<span>' + level.key + '/overlay.yml (remove/modify, trimmed)</span>'));
+            var ovPre = el('pre');
+            ovPanel.appendChild(ovPre);
+            renderSnippetChunks(ovPre, level.overlaySnippet);
+            wrap.appendChild(ovPanel);
+        }
+    }
+
+    function renderSectionTabs() {
+        var tabs = document.getElementById('sectionTabs');
+        tabs.innerHTML = '';
+        SECTIONS.forEach(function (section) {
+            var btn = el('button', 'tab-btn' + (section === activeSection ? ' active' : ''), section);
+            btn.addEventListener('click', function () { activeSection = section; renderAll(); });
+            tabs.appendChild(btn);
+        });
+    }
+
+    function renderStepper() {
+        var level = levelByKey(activeLevel);
+        var row = document.getElementById('stepperRow');
+        row.innerHTML = '';
+        var labels = ['0. Base (inherited)', '1. Remove', '2. Combine', '3. Modify'];
+        labels.forEach(function (label, stage) {
+            var btn = el('button', 'step-btn' + (stage === activeStage ? ' active' : ''), label);
+            btn.disabled = !level.extendsKey;
+            btn.addEventListener('click', function () { activeStage = stage; renderAll(); });
+            row.appendChild(btn);
+        });
+    }
+
+    function renderMergeResult() {
+        var level = levelByKey(activeLevel);
+        var stageData = computeStage(activeLevel, activeSection, level.extendsKey ? activeStage : 3);
+        var note = document.getElementById('pendingNote');
+        note.innerHTML = '';
+        if (stageData.pending && stageData.pending.length) {
+            note.appendChild(el('div', 'pending-note',
+                'Not yet combined: ' + stageData.pending.map(function (i) { return i[KEY_FIELD[activeSection]]; }).join(', ') +
+                ' (this level\'s own sdk.yml entries, added at the "Combine" step)'));
+        }
+        var list = document.getElementById('mergeResult');
+        list.innerHTML = '';
+        if (stageData.list.length === 0) {
+            list.appendChild(el('div', 'footnote', 'No ' + activeSection + ' entries at this stage.'));
+            return;
+        }
+        stageData.list.forEach(function (item) { list.appendChild(renderEntry(item, activeSection)); });
+    }
+
+    function renderEffective() {
+        var final = computeFinal(activeLevel);
+        var list = document.getElementById('effectiveResult');
+        list.innerHTML = '';
+        final.gits.forEach(function (item) { list.appendChild(renderEntry(item, 'gits')); });
+    }
+
+    // ---- Group filter simulator --------------------------------------------
+    var GROUP_PRESETS = [
+        { label: 'no filter', include: [], exclude: [] },
+        { label: '--include-group drivers', include: ['drivers'], exclude: [] },
+        { label: '--include-group core,drivers', include: ['core', 'drivers'], exclude: [] },
+        { label: '--exclude-group tests', include: [], exclude: ['tests'] },
+        { label: '--include-group drivers --exclude-group tests', include: ['drivers'], exclude: ['tests'] }
+    ];
+    var activePreset = 0;
+
+    function groupsOf(git) { return (git.group && git.group.length) ? git.group : ['default']; }
+
+    // Mirrors dsdk-cli/src/init_cmd.rs filter_git_configs_by_group().
+    function filterByGroup(gits, include, exclude) {
+        return gits.map(function (g) {
+            var groups = groupsOf(g);
+            var included = include.length === 0 || groups.some(function (gr) { return include.indexOf(gr) !== -1; });
+            var excluded = groups.some(function (gr) { return exclude.indexOf(gr) !== -1; });
+            return Object.assign({}, g, { _kept: included && !excluded });
+        });
+    }
+
+    function renderGroupPresets() {
+        var row = document.getElementById('groupPresets');
+        row.innerHTML = '';
+        GROUP_PRESETS.forEach(function (preset, i) {
+            var btn = el('button', 'preset-btn' + (i === activePreset ? ' active' : ''), preset.label);
+            btn.addEventListener('click', function () { activePreset = i; renderGroups(); });
+            row.appendChild(btn);
+        });
+    }
+
+    function renderGroups() {
+        renderGroupPresets();
+        var preset = GROUP_PRESETS[activePreset];
+        document.getElementById('groupCommand').textContent =
+            '$ cim init -t overlay-example-chain ' + (preset.include.length ? '--include-group ' + preset.include.join(',') + ' ' : '') +
+            (preset.exclude.length ? '--exclude-group ' + preset.exclude.join(',') : '');
+        var gits = computeFinal('overlay-example-chain').gits;
+        var filtered = filterByGroup(gits, preset.include, preset.exclude);
+        var list = document.getElementById('groupResult');
+        list.innerHTML = '';
+        filtered.forEach(function (item) {
+            list.appendChild(renderEntry(item, 'gits', { filteredOut: !item._kept }));
+        });
+    }
+
+    function renderAll() {
+        renderChain();
+        renderCodePanels();
+        renderSectionTabs();
+        renderStepper();
+        renderMergeResult();
+        renderEffective();
+    }
+
+    // Measures the actual rendered header/chain-bar heights so the section
+    // tabs bar stacks directly below them regardless of font/wrap changes.
+    function updateStickyOffsets() {
+        var header = document.querySelector('header.top');
+        var chainBar = document.querySelector('.chain-sticky');
+        if (header) document.documentElement.style.setProperty('--header-h', header.getBoundingClientRect().height + 'px');
+        if (chainBar) document.documentElement.style.setProperty('--chain-h', chainBar.getBoundingClientRect().height + 'px');
+    }
+
+    renderAll();
+    renderGroups();
+    updateStickyOffsets();
+    document.getElementById('chainPreview').addEventListener('mouseenter', cancelHidePreview);
+    document.getElementById('chainPreview').addEventListener('mouseleave', scheduleHidePreview);
+    var resizeTimer;
+    window.addEventListener('resize', function () {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(updateStickyOffsets, 150);
+    });
+})();
+</script>
+</body>
+</html>
