@@ -47,7 +47,8 @@ Two composition features let manifests avoid duplication:
 - `.workspace`: Workspace marker file created by init command for automatic workspace detection.
 - `Makefile`: Makefile created by `cim makefile` command for easy access to common targets.
 - `.vscode`: VCcode `tasks.json` also created when running `cim makefile`.
-- `sdk.yml`/`overlay.yml`/`os-dependencies.yml`/`python-dependencies.yml`: for a plain target these keep their bare names; for an `extends:` target, each ancestor level's own files are copied in alongside with a `<target>-` prefix (e.g. `example-sdk.yml`, `example-os-dependencies.yml`) -- see "Composing Manifests" below.
+- `sdk.yml`/`overlay.yml`/`os-dependencies.yml`/`python-dependencies.yml`: the originally-requested (primary) target always keeps these bare names at the workspace root.
+- `target-overlays/`: only present for an `extends:` target; holds each ancestor level's own files, copied in with a `<target>-` prefix (e.g. `target-overlays/example-sdk.yml`, `target-overlays/example-os-dependencies.yml`) -- see "Composing Manifests" below.
 
 ## WORKSPACE Variable and ${{ VAR }} Syntax
 
@@ -98,9 +99,12 @@ A target's `sdk.yml` can declare `extends: <base-target>` to build on
 top of another target instead of duplicating its whole manifest. All
 merge logic lives in `dsdk-cli/src/overlay.rs`; `cim init` never
 flattens the chain to disk -- every level's original files are copied
-into the workspace verbatim (see `TargetFilePair`/
-`discover_sibling_dep_files()`/`discover_dependency_files()` in
-`init_cmd.rs`/`workspace.rs`).
+into the workspace verbatim: the primary target's own files stay
+bare-named at the workspace root, every ancestor's files go into the
+`target-overlays/` subfolder (`OVERLAYS_DIR` in `workspace.rs`) under
+their `<target>-` prefixed name (see `TargetFilePair`/
+`discover_sibling_dep_files()`/`discover_dependency_files()`/
+`resolve_local_extends_chain()` in `init_cmd.rs`/`workspace.rs`).
 
 - **`sdk.yml`** (any level, including the derived target itself): new
   entries unique to that level go directly in the normal

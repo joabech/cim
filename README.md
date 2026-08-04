@@ -1024,17 +1024,20 @@ workspace.
 original files are copied into the workspace verbatim so they stay
 independently recognizable and re-editable. The originally-requested
 target keeps the bare `sdk.yml`/`overlay.yml`/`os-dependencies.yml`/
-`python-dependencies.yml` names; each ancestor's own files are copied
-alongside with a `<target>-` prefix (e.g. `example-sdk.yml`,
-`example-os-dependencies.yml`):
+`python-dependencies.yml` names at the workspace root; each ancestor's
+own files are copied into a `target-overlays/` subfolder with a
+`<target>-` prefix (e.g. `target-overlays/example-sdk.yml`,
+`target-overlays/example-os-dependencies.yml`), keeping the workspace
+root uncluttered:
 
 ```bash
 ls $HOME/dsdk-overlay-example
 # sdk.yml                  <- overlay-example's own manifest (extends: example)
 # overlay.yml               <- overlay-example's own remove/modify diff
 # os-dependencies.yml        <- overlay-example's own OS package list
-# example-sdk.yml            <- example's original manifest, copied verbatim
-# example-os-dependencies.yml <- example's own OS package list, copied verbatim
+# target-overlays/
+#   example-sdk.yml            <- example's original manifest, copied verbatim
+#   example-os-dependencies.yml <- example's own OS package list, copied verbatim
 ```
 
 See [`targets/overlay-example`](https://github.com/joabech/cim-manifests/tree/main/targets/overlay-example)
