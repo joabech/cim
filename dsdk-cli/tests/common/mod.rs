@@ -162,6 +162,7 @@ pub fn create_minimal_sdk_config() -> SdkConfig {
         variables: None,
         phases: None,
         direnv: None,
+        extends: None,
     }
 }
 
@@ -193,6 +194,7 @@ pub fn create_basic_sdk_config(repo_url: &str) -> SdkConfig {
         variables: None,
         phases: None,
         direnv: None,
+        extends: None,
     }
 }
 
@@ -247,6 +249,7 @@ pub fn create_complex_sdk_config() -> SdkConfig {
         variables: None,
         phases: None,
         direnv: None,
+        extends: None,
     }
 }
 
