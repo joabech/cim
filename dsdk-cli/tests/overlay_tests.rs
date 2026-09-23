@@ -55,6 +55,8 @@ fn new_toolchain(name: &str) -> ToolchainConfig {
         mirror_destination: None,
         environment: None,
         post_install_commands: None,
+        headers: None,
+        basic_auth: None,
     }
 }
 
@@ -272,6 +274,10 @@ fn test_merge_toolchains_own_remove_modify() {
             mirror_destination: None,
             environment: None,
             post_install_commands: None,
+            headers: Some(vec![
+                "Authorization: Bearer $TEST_TOOLCHAIN_TOKEN".to_string()
+            ]),
+            basic_auth: None,
         }],
     };
 
@@ -283,6 +289,12 @@ fn test_merge_toolchains_own_remove_modify() {
     assert!(merged.iter().any(|t| t.get_name() == "c"));
     let patched = merged.iter().find(|t| t.get_name() == "b").unwrap();
     assert_eq!(patched.destination, "toolchains/patched");
+    assert_eq!(
+        patched.headers,
+        Some(vec![
+            "Authorization: Bearer $TEST_TOOLCHAIN_TOKEN".to_string()
+        ])
+    );
 }
 
 #[test]

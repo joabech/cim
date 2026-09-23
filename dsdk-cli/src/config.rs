@@ -539,9 +539,31 @@ pub struct ToolchainConfig {
     /// ```
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub post_install_commands: Option<Vec<String>>,
+    /// Optional: custom HTTP header(s) sent with the download request,
+    /// curl `-H` style ("Name: value"). Values may reference a host env
+    /// var via `$VAR`/`${VAR}`. Use `resolved_headers()` to expand +
+    /// validate before use -- never send `headers` directly, they may
+    /// still contain an unexpanded `$VAR`.
+    #[serde(default)]
+    pub headers: Option<Vec<String>>,
+    /// Optional: HTTP Basic auth, curl `-u` style ("user:password"). Same
+    /// expansion contract as `headers`, via `resolved_basic_auth()`.
+    #[serde(default)]
+    pub basic_auth: Option<String>,
 }
 
 impl ToolchainConfig {
+    /// See `resolve_headers_list` -- never send `headers` directly, they
+    /// may still contain an unexpanded `$VAR`.
+    pub fn resolved_headers(&self) -> Result<Vec<(String, String)>, String> {
+        resolve_headers_list(&self.headers)
+    }
+
+    /// See `resolve_basic_auth_value`.
+    pub fn resolved_basic_auth(&self) -> Result<Option<(String, String)>, String> {
+        resolve_basic_auth_value(&self.basic_auth)
+    }
+
     /// Get the effective name, either from explicit name field or derived from URL
     pub fn get_name(&self) -> String {
         if let Some(ref name) = self.name {
@@ -597,47 +619,61 @@ pub struct CopyFileConfig {
     pub basic_auth: Option<String>,
 }
 
-impl CopyFileConfig {
-    /// Expand env vars in each `headers:` entry and split "Name: value"
-    /// into a `(name, value)` tuple. Returns `Err` naming the specific
-    /// unresolved `$VAR`/`${VAR}` if the referenced env var is not set, or
-    /// naming a malformed entry missing the `:` separator. Never touches
-    /// the network.
-    pub fn resolved_headers(&self) -> Result<Vec<(String, String)>, String> {
-        let mut out = Vec::new();
-        for raw in self.headers.iter().flatten() {
-            let expanded = workspace::expand_env_vars(raw);
-            if let Some(var) = workspace::find_unresolved_env_var_name(&expanded) {
-                return Err(format!(
-                    "header '{}' references environment variable '{}' which is not set",
-                    raw, var
-                ));
-            }
-            let (name, value) = expanded
-                .split_once(':')
-                .ok_or_else(|| format!("header '{}' is not in 'Name: value' format", raw))?;
-            out.push((name.trim().to_string(), value.trim().to_string()));
-        }
-        Ok(out)
-    }
-
-    /// Same expansion/fail-fast contract as `resolved_headers`, for
-    /// `basic_auth: "user:password"`.
-    pub fn resolved_basic_auth(&self) -> Result<Option<(String, String)>, String> {
-        let Some(raw) = &self.basic_auth else {
-            return Ok(None);
-        };
+/// Expand env vars in each `headers:` entry and split "Name: value" into a
+/// `(name, value)` tuple. Returns `Err` naming the specific unresolved
+/// `$VAR`/`${VAR}` if the referenced env var is not set, or naming a
+/// malformed entry missing the `:` separator. Never touches the network.
+/// Shared by `CopyFileConfig`/`ToolchainConfig`'s `resolved_headers()`.
+fn resolve_headers_list(headers: &Option<Vec<String>>) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for raw in headers.iter().flatten() {
         let expanded = workspace::expand_env_vars(raw);
         if let Some(var) = workspace::find_unresolved_env_var_name(&expanded) {
             return Err(format!(
-                "basic_auth references environment variable '{}' which is not set",
-                var
+                "header '{}' references environment variable '{}' which is not set",
+                raw, var
             ));
         }
-        let (user, pass) = expanded
+        let (name, value) = expanded
             .split_once(':')
-            .ok_or_else(|| "basic_auth value must be in 'user:password' format".to_string())?;
-        Ok(Some((user.to_string(), pass.to_string())))
+            .ok_or_else(|| format!("header '{}' is not in 'Name: value' format", raw))?;
+        out.push((name.trim().to_string(), value.trim().to_string()));
+    }
+    Ok(out)
+}
+
+/// Same expansion/fail-fast contract as `resolve_headers_list`, for a
+/// `basic_auth: "user:password"` value. Shared by
+/// `CopyFileConfig`/`ToolchainConfig`'s `resolved_basic_auth()`.
+fn resolve_basic_auth_value(
+    basic_auth: &Option<String>,
+) -> Result<Option<(String, String)>, String> {
+    let Some(raw) = basic_auth else {
+        return Ok(None);
+    };
+    let expanded = workspace::expand_env_vars(raw);
+    if let Some(var) = workspace::find_unresolved_env_var_name(&expanded) {
+        return Err(format!(
+            "basic_auth references environment variable '{}' which is not set",
+            var
+        ));
+    }
+    let (user, pass) = expanded
+        .split_once(':')
+        .ok_or_else(|| "basic_auth value must be in 'user:password' format".to_string())?;
+    Ok(Some((user.to_string(), pass.to_string())))
+}
+
+impl CopyFileConfig {
+    /// See `resolve_headers_list` -- never send `headers` directly, they
+    /// may still contain an unexpanded `$VAR`.
+    pub fn resolved_headers(&self) -> Result<Vec<(String, String)>, String> {
+        resolve_headers_list(&self.headers)
+    }
+
+    /// See `resolve_basic_auth_value`.
+    pub fn resolved_basic_auth(&self) -> Result<Option<(String, String)>, String> {
+        resolve_basic_auth_value(&self.basic_auth)
     }
 }
 
@@ -2784,5 +2820,77 @@ default_source = "https://example.com/manifests"
     fn test_resolved_basic_auth_malformed_value() {
         let cf = copy_file_config(None, Some("no-colon-here".to_string()));
         assert!(cf.resolved_basic_auth().is_err());
+    }
+
+    fn toolchain_config(
+        headers: Option<Vec<String>>,
+        basic_auth: Option<String>,
+    ) -> ToolchainConfig {
+        ToolchainConfig {
+            name: Some("toolchain_files.tgz".to_string()),
+            url: "https://example.com/toolchain".to_string(),
+            destination: "toolchains/test".to_string(),
+            strip_components: None,
+            os: None,
+            arch: None,
+            sha256: None,
+            mirror_destination: None,
+            environment: None,
+            post_install_commands: None,
+            headers,
+            basic_auth,
+        }
+    }
+
+    // ToolchainConfig delegates to the same resolve_headers_list/
+    // resolve_basic_auth_value helpers as CopyFileConfig (tested exhaustively
+    // above), so these just confirm the delegation is wired up.
+    #[test]
+    fn test_toolchain_resolved_headers_none() {
+        let tc = toolchain_config(None, None);
+        assert_eq!(tc.resolved_headers().unwrap(), vec![]);
+    }
+
+    #[test]
+    fn test_toolchain_resolved_headers_expands_env_var() {
+        std::env::set_var("TEST_TOOLCHAIN_TOKEN", "secret-token");
+        let tc = toolchain_config(
+            Some(vec![
+                "Authorization: Bearer $TEST_TOOLCHAIN_TOKEN".to_string()
+            ]),
+            None,
+        );
+        assert_eq!(
+            tc.resolved_headers().unwrap(),
+            vec![(
+                "Authorization".to_string(),
+                "Bearer secret-token".to_string()
+            )]
+        );
+        std::env::remove_var("TEST_TOOLCHAIN_TOKEN");
+    }
+
+    #[test]
+    fn test_toolchain_resolved_headers_missing_env_var() {
+        std::env::remove_var("TEST_TOOLCHAIN_TOKEN_MISSING");
+        let tc = toolchain_config(
+            Some(vec![
+                "Authorization: Bearer $TEST_TOOLCHAIN_TOKEN_MISSING".to_string()
+            ]),
+            None,
+        );
+        let err = tc.resolved_headers().unwrap_err();
+        assert!(err.contains("TEST_TOOLCHAIN_TOKEN_MISSING"));
+    }
+
+    #[test]
+    fn test_toolchain_resolved_basic_auth_expands_env_var() {
+        std::env::set_var("TEST_TOOLCHAIN_TOKEN2", "xyz789");
+        let tc = toolchain_config(None, Some("token:$TEST_TOOLCHAIN_TOKEN2".to_string()));
+        assert_eq!(
+            tc.resolved_basic_auth().unwrap(),
+            Some(("token".to_string(), "xyz789".to_string()))
+        );
+        std::env::remove_var("TEST_TOOLCHAIN_TOKEN2");
     }
 }
