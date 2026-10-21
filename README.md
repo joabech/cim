@@ -480,6 +480,43 @@ The Makefile auto-discovers these as `sdk-deploy` and `sdk-lint` overlay targets
 Custom phases are useful for workflows like deployment, linting, documentation
 generation, or other domain-specific build operations.
 
+A `phases:` entry can also be a mapping that gives the custom phase its own
+ordering and recipe, using the same `commands`/`depends_on` keys as the
+standard `build:`/`test:`/... blocks. Plain names and mappings can be mixed:
+
+```yaml
+phases:
+  - prune
+  - name: release-verify
+    depends_on: [prune]           # sdk-release-verify runs after sdk-prune
+  - name: release-deliver
+    depends_on: [release-verify]
+    commands:                     # recipe of sdk-release-deliver, runs last
+      - "@echo Delivered ${{ RELEASE_TAG }}"
+```
+
+which generates:
+
+```makefile
+sdk-prune: release-tools-prune
+
+sdk-release-verify: sdk-prune release-tools-release-verify
+release-tools-release-verify: sdk-prune
+
+sdk-release-deliver: sdk-release-verify release-tools-release-deliver
+	@echo Delivered $(RELEASE_TAG)
+release-tools-release-deliver: sdk-release-verify
+```
+
+A `depends_on` entry that names a phase (`prune` or `sdk-prune`, standard
+phases included) becomes a prerequisite on `sdk-<phase>`; a git name or
+`install-<name>` target is passed through verbatim. The discovered
+`<repo>-<phase>` targets get the same prerequisites, so the ordering also
+holds under `make -j`, and each phase still runs only once per `make`
+invocation. `cim makefile` rejects unknown names in `depends_on`, dependency
+cycles between phases, and `commands`/`depends_on` on a standard phase in
+`phases:` (configure those with their top-level block instead).
+
 #### foreach
 
 Run command in each repo.
