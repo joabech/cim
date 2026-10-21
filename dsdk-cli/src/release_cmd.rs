@@ -19,6 +19,7 @@ use dsdk_cli::workspace::{
     resolve_config_source_dir_from_marker, resolve_mirror,
 };
 
+use crate::release_export::{compile_regex_list, export_manifest, ExportOptions};
 use crate::release_stage::{stage_gits, StageGit};
 #[cfg(test)]
 use dsdk_cli::workspace::SDK_CONFIG_FILE;
@@ -36,12 +37,25 @@ pub(crate) struct ReleaseOptions<'a> {
     pub exclude: &'a [String],
     pub dry_run: bool,
     pub stage: Option<&'a Path>,
+    pub export: Option<ExportRequest<'a>>,
+}
+
+/// `--export-manifest FILE` and its options, as given on the command line.
+pub(crate) struct ExportRequest<'a> {
+    pub path: &'a Path,
+    pub url_template: Option<&'a str>,
+    pub commit: Option<&'a str>,
+    pub drop_phases: &'a [String],
+    pub drop_vars: &'a [String],
+    pub drop_copy_files: &'a [String],
 }
 
 /// Bail out unless at least one release action was requested.
 fn validate_release_args(opts: &ReleaseOptions) -> Result<(), ()> {
-    if opts.tag.is_none() && !opts.genconfig && opts.stage.is_none() {
-        messages::error("Must specify at least one of --tag, --genconfig or --stage");
+    if opts.tag.is_none() && !opts.genconfig && !opts.wants_output() {
+        messages::error(
+            "Must specify at least one of --tag, --genconfig, --stage or --export-manifest",
+        );
         return Err(());
     }
     Ok(())
@@ -435,8 +449,53 @@ impl ReleaseOptions<'_> {
     /// Whether a release output (staged trees, exported manifest) was
     /// requested. Those are meant to be scripted, so failures exit non-zero.
     fn wants_output(&self) -> bool {
-        self.stage.is_some()
+        self.stage.is_some() || self.export.is_some()
     }
+}
+
+/// `--export-manifest FILE`: write the cleaned customer manifest.
+fn run_export(
+    config_path: &Path,
+    req: &ExportRequest,
+    include_regex: &Option<Regex>,
+    exclude_regex: &Option<Regex>,
+    dry_run: bool,
+) -> Result<(), ()> {
+    let fail = |e: String| messages::error(&format!("Export manifest: {}", e));
+    let drop_vars = compile_regex_list(req.drop_vars, "--drop-var").map_err(fail)?;
+    let drop_copy_files =
+        compile_regex_list(req.drop_copy_files, "--drop-copy-files").map_err(fail)?;
+    let opts = ExportOptions {
+        url_template: req.url_template,
+        commit: req.commit,
+        drop_phases: req.drop_phases,
+        drop_vars: &drop_vars,
+        drop_copy_files: &drop_copy_files,
+    };
+    let selected = |name: &str| git_selected(name, include_regex, exclude_regex);
+    let (yaml, count) = export_manifest(config_path, &selected, &opts).map_err(fail)?;
+
+    if dry_run {
+        messages::status(&format!(
+            "\nWould write manifest with {} git(s) to {}:",
+            count,
+            req.path.display()
+        ));
+        print!("{}", yaml);
+        return Ok(());
+    }
+    if let Some(parent) = req.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|e| fail(format!("Failed to create {}: {}", parent.display(), e)))?;
+    }
+    fs::write(req.path, yaml)
+        .map_err(|e| fail(format!("Failed to write {}: {}", req.path.display(), e)))?;
+    messages::success(&format!(
+        "Wrote manifest with {} git(s) to {}",
+        count,
+        req.path.display()
+    ));
+    Ok(())
 }
 
 /// Handle the release command
@@ -500,6 +559,10 @@ fn run_release(opts: &ReleaseOptions) -> Result<(), ()> {
             &exclude_regex,
             dry_run,
         )?;
+    }
+
+    if let Some(req) = &opts.export {
+        run_export(&config_path, req, &include_regex, &exclude_regex, dry_run)?;
     }
     Ok(())
 }

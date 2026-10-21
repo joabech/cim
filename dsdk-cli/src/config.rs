@@ -53,7 +53,7 @@ where
 /// never numeric values, so defensively quote any bare all-digit `commit:`
 /// value here, forcing it to stay a literal string regardless of leading
 /// zeros. Already-quoted values are left untouched.
-fn quote_numeric_commit_values(yaml: &str) -> String {
+pub fn quote_numeric_commit_values(yaml: &str) -> String {
     let re = Regex::new(r#"(?m)^(\s*commit\s*:\s*)([+-]?[0-9]+)(\s*(?:#.*)?)$"#)
         .expect("static regex is valid");
     re.replace_all(yaml, "$1\"$2\"$3").into_owned()

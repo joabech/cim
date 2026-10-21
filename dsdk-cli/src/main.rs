@@ -15,6 +15,7 @@ mod init_cmd;
 mod install_cmd;
 mod makefile;
 mod release_cmd;
+mod release_export;
 mod release_stage;
 mod update_cmd;
 mod utils_cmd;
@@ -31,7 +32,7 @@ use init_cmd::{
 };
 use install_cmd::handle_install_command;
 use makefile::handle_makefile_command;
-use release_cmd::{handle_release_command, ReleaseOptions};
+use release_cmd::{handle_release_command, ExportRequest, ReleaseOptions};
 use update_cmd::{
     handle_config_command, handle_docker_command, handle_list_targets_command,
     handle_update_command, ConfigOptions, UpdateOptions,
@@ -184,6 +185,12 @@ fn main() {
             exclude,
             dry_run,
             stage,
+            export_manifest,
+            url_template,
+            commit,
+            drop_phase,
+            drop_var,
+            drop_copy_files,
         } => {
             handle_release_command(&ReleaseOptions {
                 tag: tag.as_deref(),
@@ -192,6 +199,14 @@ fn main() {
                 exclude,
                 dry_run: *dry_run,
                 stage: stage.as_deref(),
+                export: export_manifest.as_deref().map(|path| ExportRequest {
+                    path,
+                    url_template: url_template.as_deref(),
+                    commit: commit.as_deref(),
+                    drop_phases: drop_phase,
+                    drop_vars: drop_var,
+                    drop_copy_files,
+                }),
             });
         }
         Commands::Config {

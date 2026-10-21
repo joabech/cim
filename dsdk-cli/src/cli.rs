@@ -248,7 +248,7 @@ pub enum Commands {
         #[command(subcommand)]
         docker_command: DockerCommand,
     },
-    /// Create release tags and configuration
+    /// Create release tags, configuration and deliverables
     Release {
         /// Release tag to apply, e.g. v1.0.0
         #[arg(short, long)]
@@ -261,8 +261,8 @@ pub enum Commands {
         /// Unanchored, use '^name$' for an exact match. Comma-separated or repeated: --include 'adi.*,core.*' or
         /// --include 'adi.*' --include 'core.*'. --tag only considers the
         /// target's own gits (for an extends: target, the ones it adds or
-        /// modifies); --stage selects from all workspace gits, including
-        /// those inherited via extends:.
+        /// modifies); --stage and --export-manifest select from all
+        /// workspace gits, including those inherited via extends:.
         #[arg(short, long, value_name = "REGEX")]
         include: Vec<String>,
         /// Skip repositories matching this regex
@@ -290,6 +290,55 @@ pub enum Commands {
         /// and not listed.
         #[arg(short, long, value_name = "DIR")]
         stage: Option<PathBuf>,
+        /// Write a cleaned customer sdk.yml to FILE
+        ///
+        /// Built from the resolved workspace config (an extends:/overlay:
+        /// target is flattened), with only the gits selected by
+        /// --include/--exclude and without their group: key. Variable
+        /// values stay as written in sdk.yml (not expanded); comments are
+        /// not kept. Everything else passes through unless dropped below.
+        /// Nothing is rewritten to fit: the export is refused, listing each
+        /// problem, if a depends_on, build_depends_on, git_depends_on or
+        /// depends_on_gits entry would name a git that is not exported or a
+        /// dropped phase, or a value or command would reference a variable
+        /// that is not exported (${{ VAR }} or $(VAR)).
+        #[arg(short = 'm', long, value_name = "FILE")]
+        export_manifest: Option<PathBuf>,
+        /// URL of each exported git; {name} is the git name
+        ///
+        /// E.g. --url-template 'https://example.com/acme/{name}.git'.
+        #[arg(short, long, value_name = "TEMPLATE", requires = "export_manifest")]
+        url_template: Option<String>,
+        /// Commit (branch, tag or sha) of each exported git
+        #[arg(short, long, value_name = "REF", requires = "export_manifest")]
+        commit: Option<String>,
+        /// Drop this custom phase from the exported phases:
+        ///
+        /// Exact phase names, comma-separated or repeated (unlike the
+        /// --drop-* regex options): --drop-phase prune,release-verify.
+        /// Every name must match an entry of phases:; standard phases
+        /// (build, test, ...) cannot be dropped. phases: is omitted when
+        /// empty.
+        #[arg(
+            short = 'p',
+            long,
+            value_name = "NAME",
+            value_delimiter = ',',
+            requires = "export_manifest"
+        )]
+        drop_phase: Vec<String>,
+        /// Drop exported variables whose name matches this regex
+        ///
+        /// Unanchored, use '^NAME$' for an exact match. Repeated, not
+        /// comma-separated: --drop-var '^RELEASE_' --drop-var '^CUSTOMER$'.
+        #[arg(short = 'V', long, value_name = "REGEX", requires = "export_manifest")]
+        drop_var: Vec<String>,
+        /// Drop exported copy_files whose source matches this regex
+        ///
+        /// Unanchored. Repeated, not comma-separated. copy_files: is
+        /// omitted when empty.
+        #[arg(short = 'F', long, value_name = "REGEX", requires = "export_manifest")]
+        drop_copy_files: Vec<String>,
     },
 
     /// Manage user configuration

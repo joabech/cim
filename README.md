@@ -776,13 +776,16 @@ Create release tags, and stage release content.
 ```bash
 cim release --tag TAG [--include PATTERNS] [--exclude PATTERNS] [--dry-run]
 cim release --stage DIR [--include PATTERNS] [--exclude PATTERNS] [--dry-run]
+cim release --export-manifest FILE [--include PATTERNS] [--exclude PATTERNS]
+            [--url-template TEMPLATE] [--commit REF] [--drop-phase NAMES]
+            [--drop-var REGEX] [--drop-copy-files REGEX] [--dry-run]
 ```
 
 `--include`/`--exclude` select gits by name (unanchored regexes, use
 `^name$` for an exact match). `--tag` only considers the target's own
 gits (for an `extends:` target, the gits it adds or modifies), while
-`--stage` selects from all workspace gits, including those inherited
-via `extends:`.
+`--stage` and `--export-manifest` select from all workspace gits,
+including those inherited via `extends:`.
 
 `--stage DIR` exports the `HEAD` tree of each selected git with
 `git archive` into `DIR/<git-name>/` (file modes and symlinks
@@ -812,6 +815,48 @@ into an empty `DIR` when `stage.json` must describe everything in it:
   }
 }
 ```
+
+`--export-manifest FILE` writes a cleaned `sdk.yml` for handing to a
+customer. It is built from the resolved workspace configuration, so a
+target using `extends:`/`overlay:` is exported flattened into one
+standalone manifest. Variable values are written as the raw text from
+`sdk.yml` (`${{ WORKSPACE }}/out` stays exactly that), comments are not
+kept, and top-level keys keep their input order. Only the gits selected
+by `--include`/`--exclude` are exported, without their `group:` key.
+Everything else passes through, apart from what these options change:
+
+- `--url-template` (`-u`) sets each git's `url`; `{name}` is replaced by
+  the git name.
+- `--commit` (`-c`) sets each git's `commit`.
+- `--drop-phase` (`-p`) removes custom phases from `phases:`, by exact
+  name, comma-separated or repeated; `phases:` is omitted when nothing is
+  left. Each name must match a `phases:` entry (a typo is an error), and
+  standard phases (`build`, `test`, ...) cannot be dropped.
+- `--drop-var` (`-V`) removes variables whose name matches the regex
+  (unanchored, use `^NAME$`; repeated, not comma-separated).
+- `--drop-copy-files` (`-F`) removes `copy_files:` entries whose `source`
+  matches the regex (unanchored; repeated, not comma-separated);
+  `copy_files:` is omitted when nothing is left.
+
+The export is refused, listing each problem and where it is, when the
+result would not stand on its own: a `depends_on` (standard or custom
+phase), `build_depends_on`, `git_depends_on` or `depends_on_gits` entry
+naming a git that is not exported or a dropped phase, a value or command
+referencing a variable that is not exported (`${{ VAR }}` or `$(VAR)`,
+including the `<GIT>_DIR` of a git left out), or anything else `cim
+makefile` would reject. Nothing is rewritten to fit; drop or exclude the
+referring entry too, or change it in `sdk.yml`.
+
+```bash
+cim release --export-manifest out/sdk.yml --include '^(build|drivers)$' \
+    --url-template 'https://example.com/acme/{name}.git' --commit v1.0.0 \
+    --drop-phase prune,release-deliver --drop-var '^RELEASE_' \
+    --drop-copy-files '^profiles/'
+```
+
+With `--dry-run` the manifest is printed instead of written. `--stage`
+and `--export-manifest` can be combined with each other and with `--tag`;
+they exit non-zero on failure.
 
 #### config
 

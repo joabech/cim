@@ -42,7 +42,9 @@
 #   - docker create: --target (-t), --source (-s), --version (-v), --distro (-d),
 #                    --output (-o), --force (-f)
 #   - release: --tag (-t), --genconfig (-g), --include (-i), --exclude (-e),
-#              --dry-run (-n), --stage (-s)
+#              --dry-run (-n), --stage (-s), --export-manifest (-m),
+#              --url-template (-u), --commit (-c), --drop-phase (-p),
+#              --drop-var (-V), --drop-copy-files (-F)
 #   - config: --list (-l), --get (-g), --path (-p), --template (-t), --create (-c),
 #             --force (-f), --edit (-e), --validate (-v)
 #   - utils hash-copy-files: --dry-run (-n), --verbose, --add-missing (-a)
@@ -524,8 +526,16 @@ _cim_completions() {
                     COMPREPLY=( $(compgen -d -- "${cur}") )
                     return 0
                     ;;
+                -m|--export-manifest)
+                    _complete_file_path
+                    return 0
+                    ;;
+                -u|--url-template|-c|--commit|-p|--drop-phase|-V|--drop-var|-F|--drop-copy-files)
+                    # User-defined values, no completion
+                    return 0
+                    ;;
                 *)
-                    COMPREPLY=( $(compgen -W "--tag -t --genconfig -g --include -i --exclude -e --dry-run -n --stage -s --help -h" -- "${cur}") )
+                    COMPREPLY=( $(compgen -W "--tag -t --genconfig -g --include -i --exclude -e --dry-run -n --stage -s --export-manifest -m --url-template -u --commit -c --drop-phase -p --drop-var -V --drop-copy-files -F --help -h" -- "${cur}") )
                     return 0
                     ;;
             esac

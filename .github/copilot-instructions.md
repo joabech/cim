@@ -127,7 +127,8 @@ combined result). `merge_variables()` follows the same idea for the
 entry names belong to the derived target (either added directly in
 its own `sdk.yml` or referenced in its `overlay:` key's `modify:`).
 This powers scoping for `cim release` (only tags/freezes gits owned by
-the target) and `cim utils hash-copy-files`/`hash-toolchains` (both
+the target; `--stage`/`--export-manifest` are not scoped, they work on
+the fully resolved config, see `release_stage.rs`/`release_export.rs`) and `cim utils hash-copy-files`/`hash-toolchains` (both
 always write the computed hash back into sdk.yml, since `overlay:` now
 lives inside it -- see `load_extends_owned_entries()` in
 `release_cmd.rs`).
