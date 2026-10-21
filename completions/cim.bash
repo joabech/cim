@@ -42,7 +42,7 @@
 #   - docker create: --target (-t), --source (-s), --version (-v), --distro (-d),
 #                    --output (-o), --force (-f)
 #   - release: --tag (-t), --genconfig (-g), --include (-i), --exclude (-e),
-#              --dry-run (-n)
+#              --dry-run (-n), --stage (-s)
 #   - config: --list (-l), --get (-g), --path (-p), --template (-t), --create (-c),
 #             --force (-f), --edit (-e), --validate (-v)
 #   - utils hash-copy-files: --dry-run (-n), --verbose, --add-missing (-a)
@@ -520,8 +520,12 @@ _cim_completions() {
                     COMPREPLY=( $(compgen -W "\"optee.*\" \"test.*\" \".*-test\" \".*_test\" \"adi.*\" \"core.*\"" -- "${cur}") )
                     return 0
                     ;;
+                -s|--stage)
+                    COMPREPLY=( $(compgen -d -- "${cur}") )
+                    return 0
+                    ;;
                 *)
-                    COMPREPLY=( $(compgen -W "--tag -t --genconfig -g --include -i --exclude -e --dry-run -n --help -h" -- "${cur}") )
+                    COMPREPLY=( $(compgen -W "--tag -t --genconfig -g --include -i --exclude -e --dry-run -n --stage -s --help -h" -- "${cur}") )
                     return 0
                     ;;
             esac

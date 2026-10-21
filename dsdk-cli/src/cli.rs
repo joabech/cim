@@ -258,19 +258,38 @@ pub enum Commands {
         genconfig: bool,
         /// Only repositories matching this regex
         ///
-        /// Comma-separated or repeated: --include 'adi.*,core.*' or
-        /// --include 'adi.*' --include 'core.*'.
+        /// Unanchored, use '^name$' for an exact match. Comma-separated or repeated: --include 'adi.*,core.*' or
+        /// --include 'adi.*' --include 'core.*'. --tag only considers the
+        /// target's own gits (for an extends: target, the ones it adds or
+        /// modifies); --stage selects from all workspace gits, including
+        /// those inherited via extends:.
         #[arg(short, long, value_name = "REGEX")]
         include: Vec<String>,
         /// Skip repositories matching this regex
         ///
-        /// Comma-separated or repeated: --exclude 'drivers,CMSIS_6' or
+        /// Unanchored, use '^name$' for an exact match. Comma-separated or repeated: --exclude 'drivers,CMSIS_6' or
         /// --exclude drivers --exclude CMSIS_6.
         #[arg(short, long, value_name = "REGEX")]
         exclude: Vec<String>,
         /// Show what would be done without changes
         #[arg(short = 'n', long)]
         dry_run: bool,
+        /// Export selected gits' HEAD trees into DIR
+        ///
+        /// Each git lands in DIR/<git-name>. Uses `git archive`, so only
+        /// committed content is staged; refuses
+        /// if a selected git has tracked uncommitted changes. Submodule
+        /// content is not staged (a warning names them). Refuses if a
+        /// destination is or contains the workspace, or overlaps any
+        /// workspace git checkout. Existing
+        /// DIR/<git-name> folders are replaced, other content of DIR is left
+        /// alone. Writes DIR/stage.json with each git's sha and its url as
+        /// written in sdk.yml (env vars such as ${TOKEN} not expanded, user
+        /// config overrides not applied). stage.json describes this run
+        /// only; trees staged by earlier runs into DIR are left in place
+        /// and not listed.
+        #[arg(short, long, value_name = "DIR")]
+        stage: Option<PathBuf>,
     },
 
     /// Manage user configuration

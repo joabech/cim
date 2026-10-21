@@ -771,10 +771,46 @@ cim docs serve [--port PORT]
 
 #### release
 
-Create release tags.
+Create release tags, and stage release content.
 
 ```bash
 cim release --tag TAG [--include PATTERNS] [--exclude PATTERNS] [--dry-run]
+cim release --stage DIR [--include PATTERNS] [--exclude PATTERNS] [--dry-run]
+```
+
+`--include`/`--exclude` select gits by name (unanchored regexes, use
+`^name$` for an exact match). `--tag` only considers the target's own
+gits (for an `extends:` target, the gits it adds or modifies), while
+`--stage` selects from all workspace gits, including those inherited
+via `extends:`.
+
+`--stage DIR` exports the `HEAD` tree of each selected git with
+`git archive` into `DIR/<git-name>/` (file modes and symlinks
+preserved, no `.git`), replacing an existing `DIR/<git-name>/` and
+leaving the rest of `DIR` alone. It refuses, before writing anything,
+if a selected git has tracked uncommitted changes (untracked files are
+fine, they are never staged), or if a destination is or contains the
+workspace root, or overlaps the checkout of any git in `sdk.yml`.
+Submodules are not staged, `git archive` leaves an empty directory for
+them; cim warns about each git that has any.
+
+What was staged is recorded in `DIR/stage.json`, gits in `sdk.yml`
+order. The `url` is the one written in `sdk.yml`: environment variables
+in it (e.g. `https://${TOKEN}@...`) are not expanded and user config
+overrides are not applied, so no credentials or internal mirror urls
+end up in it. `stage.json` describes the current run only: trees staged
+into `DIR` by earlier runs are left alone and are not listed, so stage
+into an empty `DIR` when `stage.json` must describe everything in it:
+
+```json
+{
+  "gits": {
+    "build": {
+      "sha": "10d7f3dba73f6d58ecc3296473481c578361a28e",
+      "url": "https://example.com/build.git"
+    }
+  }
+}
 ```
 
 #### config

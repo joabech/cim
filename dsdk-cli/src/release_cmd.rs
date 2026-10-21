@@ -15,10 +15,11 @@ use dsdk_cli::download::{
 };
 use dsdk_cli::workspace::{
     copy_dir_recursive, expand_env_vars, expand_manifest_vars_in_config, is_url,
-    load_config_with_user_overrides, require_workspace_config,
+    load_config_with_extends, load_config_with_user_overrides, require_workspace_config,
     resolve_config_source_dir_from_marker, resolve_mirror,
 };
 
+use crate::release_stage::{stage_gits, StageGit};
 #[cfg(test)]
 use dsdk_cli::workspace::SDK_CONFIG_FILE;
 use dsdk_cli::{config, git_operations, messages};
@@ -27,20 +28,36 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Bail out unless exactly one of `--tag`/`--genconfig` (or both) was given.
-fn validate_release_args(tag: Option<&str>, genconfig: bool) -> Result<(), ()> {
-    if tag.is_none() && !genconfig {
-        messages::error("Must specify either --tag or --genconfig (or both)");
+/// Options for `cim release`, as given on the command line.
+pub(crate) struct ReleaseOptions<'a> {
+    pub tag: Option<&'a str>,
+    pub genconfig: bool,
+    pub include: &'a [String],
+    pub exclude: &'a [String],
+    pub dry_run: bool,
+    pub stage: Option<&'a Path>,
+}
+
+/// Bail out unless at least one release action was requested.
+fn validate_release_args(opts: &ReleaseOptions) -> Result<(), ()> {
+    if opts.tag.is_none() && !opts.genconfig && opts.stage.is_none() {
+        messages::error("Must specify at least one of --tag, --genconfig or --stage");
         return Err(());
     }
     Ok(())
 }
 
-fn print_release_start_status(tag: Option<&str>, workspace_path: &Path, dry_run: bool) {
+fn print_release_start_status(opts: &ReleaseOptions, workspace_path: &Path) {
+    let (tag, dry_run) = (opts.tag, opts.dry_run);
     if let Some(tag_str) = tag {
         messages::status(&format!(
             "Creating release {} in workspace: {}",
             tag_str,
+            workspace_path.display()
+        ));
+    } else if !opts.genconfig {
+        messages::status(&format!(
+            "Preparing release output from workspace: {}",
             workspace_path.display()
         ));
     } else {
@@ -346,73 +363,145 @@ fn print_release_summary(tag: Option<&str>, dry_run: bool, results: &TagResults)
     }
 }
 
-/// Handle the release command
-pub(crate) fn handle_release_command(
-    tag: Option<&str>,
-    genconfig: bool,
-    include_patterns: &[String],
-    exclude_patterns: &[String],
+/// Whether `name` is selected by `--include`/`--exclude` alone. Unlike
+/// tagging, staging and manifest export work on the resolved workspace, so
+/// gits inherited via extends: are selectable too.
+pub(crate) fn git_selected(
+    name: &str,
+    include_regex: &Option<Regex>,
+    exclude_regex: &Option<Regex>,
+) -> bool {
+    release_skip_reason(
+        name,
+        &TagFilter {
+            owned_names: &None,
+            include_regex,
+            exclude_regex,
+        },
+    )
+    .is_none()
+}
+
+/// The gits `--stage` exports and the workspace they live in. Built from
+/// sdk.yml as written (extends: resolved, no user-config overrides and no
+/// env var expansion), so the urls recorded in stage.json are exactly the
+/// ones in sdk.yml: an `https://${TOKEN}@...` url or an internal mirror
+/// set in the user config must not end up in a deliverable.
+fn stage_plan(
+    config_path: &Path,
+    workspace_path: &Path,
+    include_regex: &Option<Regex>,
+    exclude_regex: &Option<Regex>,
+) -> Result<(Vec<StageGit>, crate::release_stage::StageWorkspace), String> {
+    let as_written = load_config_with_extends(config_path)
+        .map_err(|e| format!("Error loading config: {}", e))?;
+    let gits = as_written
+        .gits
+        .iter()
+        .filter(|g| git_selected(&g.name, include_regex, exclude_regex))
+        .map(|g| StageGit {
+            name: g.name.clone(),
+            url: g.url.clone(),
+            path: workspace_path.join(&g.name),
+        })
+        .collect();
+    let workspace = crate::release_stage::StageWorkspace {
+        root: workspace_path.to_path_buf(),
+        checkouts: as_written
+            .gits
+            .iter()
+            .map(|g| (g.name.clone(), workspace_path.join(&g.name)))
+            .collect(),
+    };
+    Ok((gits, workspace))
+}
+
+/// `--stage DIR`: export the selected gits' HEAD trees into DIR.
+fn run_stage(
+    config_path: &Path,
+    workspace_path: &Path,
+    stage_dir: &Path,
+    include_regex: &Option<Regex>,
+    exclude_regex: &Option<Regex>,
     dry_run: bool,
-) {
-    // Must be run from within a workspace
-    let (workspace_path, config_path) = match require_workspace_config() {
-        Ok(paths) => paths,
-        Err(e) => {
-            messages::error(&e);
-            return;
-        }
-    };
+) -> Result<(), ()> {
+    let fail = |e: String| messages::error(&format!("Stage: {}", e));
+    let (gits, workspace) =
+        stage_plan(config_path, workspace_path, include_regex, exclude_regex).map_err(fail)?;
+    stage_gits(&gits, &workspace, stage_dir, dry_run).map_err(fail)
+}
 
-    if validate_release_args(tag, genconfig).is_err() {
-        return;
+impl ReleaseOptions<'_> {
+    /// Whether a release output (staged trees, exported manifest) was
+    /// requested. Those are meant to be scripted, so failures exit non-zero.
+    fn wants_output(&self) -> bool {
+        self.stage.is_some()
     }
+}
 
-    print_release_start_status(tag, &workspace_path, dry_run);
+/// Handle the release command
+pub(crate) fn handle_release_command(opts: &ReleaseOptions) {
+    if run_release(opts).is_err() && opts.wants_output() {
+        std::process::exit(1);
+    }
+}
 
-    let sdk_config = match load_config_with_user_overrides(&config_path, false) {
-        Ok(config) => config,
-        Err(e) => {
-            messages::error(&format!("Error loading config: {}", e));
-            return;
-        }
-    };
+fn run_release(opts: &ReleaseOptions) -> Result<(), ()> {
+    let (tag, genconfig, dry_run) = (opts.tag, opts.genconfig, opts.dry_run);
+    // Must be run from within a workspace
+    let (workspace_path, config_path) =
+        require_workspace_config().map_err(|e| messages::error(&e))?;
 
-    let owned_names = match resolve_release_owned_gits(&config_path) {
-        Ok(names) => names,
-        Err(()) => return,
-    };
+    validate_release_args(opts)?;
 
-    let (include_regex, exclude_regex) =
-        match compile_release_regexes(include_patterns, exclude_patterns) {
-            Ok(pair) => pair,
-            Err(()) => return,
+    print_release_start_status(opts, &workspace_path);
+
+    let sdk_config = load_config_with_user_overrides(&config_path, false)
+        .map_err(|e| messages::error(&format!("Error loading config: {}", e)))?;
+
+    let (include_regex, exclude_regex) = compile_release_regexes(opts.include, opts.exclude)?;
+
+    if tag.is_some() || genconfig {
+        let owned_names = resolve_release_owned_gits(&config_path)?;
+        let filter = TagFilter {
+            owned_names: &owned_names,
+            include_regex: &include_regex,
+            exclude_regex: &exclude_regex,
         };
 
-    let filter = TagFilter {
-        owned_names: &owned_names,
-        include_regex: &include_regex,
-        exclude_regex: &exclude_regex,
-    };
+        let results = match tag {
+            Some(tag_str) => tag_repos(&sdk_config, &workspace_path, tag_str, &filter, dry_run),
+            None => TagResults::default(),
+        };
 
-    let results = match tag {
-        Some(tag_str) => tag_repos(&sdk_config, &workspace_path, tag_str, &filter, dry_run),
-        None => TagResults::default(),
-    };
+        maybe_generate_release_config(
+            genconfig,
+            dry_run,
+            &config_path,
+            tag,
+            &include_regex,
+            &results,
+        )?;
 
-    if maybe_generate_release_config(
-        genconfig,
-        dry_run,
-        &config_path,
-        tag,
-        &include_regex,
-        &results,
-    )
-    .is_err()
-    {
-        return;
+        print_release_summary(tag, dry_run, &results);
+
+        if opts.wants_output() && !results.failed.is_empty() {
+            messages::error("Not continuing with release output: tagging failed");
+            return Err(());
+        }
     }
 
-    print_release_summary(tag, dry_run, &results);
+    if let Some(stage_dir) = opts.stage {
+        run_stage(
+            &config_path,
+            &workspace_path,
+            stage_dir,
+            &include_regex,
+            &exclude_regex,
+            dry_run,
+        )?;
+    }
+    Ok(())
 }
 
 /// Get the current commit hash from a repository
@@ -1758,6 +1847,33 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// Regression: stage.json urls came from the expanded config, so a
+    /// token in `https://${TOKEN}@...` ended up in the deliverable.
+    #[test]
+    fn test_stage_plan_records_urls_as_written() {
+        let tmp = TempDir::new().unwrap();
+        let var = "CIM_TEST_STAGE_PLAN_TOKEN";
+        std::env::set_var(var, "s3cr3t");
+        let config_path = tmp.path().join(SDK_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            format!(
+                "gits:\n  - name: a\n    url: https://${{{var}}}@example.com/a.git\n    commit: main\n  - name: b\n    url: https://example.com/b.git\n    commit: main\n"
+            ),
+        )
+        .unwrap();
+        let include = Some(Regex::new("^a$").unwrap());
+        let (gits, ws) = stage_plan(&config_path, tmp.path(), &include, &None).unwrap();
+        std::env::remove_var(var);
+
+        assert_eq!(gits.len(), 1);
+        assert_eq!(gits[0].url, format!("https://${{{var}}}@example.com/a.git"));
+        assert!(!gits[0].url.contains("s3cr3t"));
+        // Every workspace git is guarded, not only the selected ones.
+        let names: Vec<_> = ws.checkouts.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+    }
 
     // Test helper function to create a temporary workspace
     fn create_test_workspace() -> (TempDir, PathBuf) {

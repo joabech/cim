@@ -15,6 +15,7 @@ mod init_cmd;
 mod install_cmd;
 mod makefile;
 mod release_cmd;
+mod release_stage;
 mod update_cmd;
 mod utils_cmd;
 mod venv_lock;
@@ -30,7 +31,7 @@ use init_cmd::{
 };
 use install_cmd::handle_install_command;
 use makefile::handle_makefile_command;
-use release_cmd::handle_release_command;
+use release_cmd::{handle_release_command, ReleaseOptions};
 use update_cmd::{
     handle_config_command, handle_docker_command, handle_list_targets_command,
     handle_update_command, ConfigOptions, UpdateOptions,
@@ -182,8 +183,16 @@ fn main() {
             include,
             exclude,
             dry_run,
+            stage,
         } => {
-            handle_release_command(tag.as_deref(), *genconfig, include, exclude, *dry_run);
+            handle_release_command(&ReleaseOptions {
+                tag: tag.as_deref(),
+                genconfig: *genconfig,
+                include,
+                exclude,
+                dry_run: *dry_run,
+                stage: stage.as_deref(),
+            });
         }
         Commands::Config {
             list,
