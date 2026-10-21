@@ -95,6 +95,11 @@ pub(crate) fn handle_makefile_command(
         .map(parse_group_list)
         .unwrap_or_default();
 
+    if let Err(e) = config::validate_phases(&sdk_config) {
+        messages::error(&e);
+        std::process::exit(1);
+    }
+
     let makefile_sdk_config =
         filtered_sdk_config_for_makefile(&sdk_config, &None, &include_groups, &exclude_groups);
 
@@ -471,10 +476,16 @@ fn emit_phase_targets_section<T: config::SdkConfigCore>(
     }
     makefile.push_str(&format!("all: {}\n\n", all_deps.join(" ")));
 
+    let standard_phases = config::default_phases();
+
     // Add sdk-<phase> targets for every configured phase
     for phase in phases {
         let deps = phase_deps.get(phase).map(|v| v.as_slice()).unwrap_or(&[]);
         let target = sdk_config.phase_target(phase);
+        if !standard_phases.contains(phase) {
+            add_custom_phase_target(makefile, phase, target, deps, phases);
+            continue;
+        }
         if phase == "help" {
             add_help_target(
                 makefile,
@@ -492,6 +503,8 @@ fn emit_phase_targets_section<T: config::SdkConfigCore>(
             _ => None,
         };
         add_phase_target(makefile, phase, target, deps, fallback);
+        let phase_deps = target.and_then(|t| t.depends_on()).unwrap_or(&[]);
+        add_fragment_ordering(makefile, deps, phase_deps);
     }
 }
 
@@ -731,6 +744,55 @@ pub(crate) fn add_phase_target(
         }
     }
 
+    makefile.push('\n');
+}
+
+/// Add an `sdk-<phase>` target for a custom (`phases:`) phase.
+///
+/// `depends_on` entries naming a phase are resolved to `sdk-<phase>` and
+/// listed before the discovered `<git>-<phase>` targets. Because Make may
+/// build the prerequisites of one target in parallel under `-j`, each
+/// discovered `<git>-<phase>` target additionally gets the resolved
+/// dependencies as its own prerequisites, so the phase's work never starts
+/// before the phases it depends on have finished. Make builds every target
+/// at most once per invocation, so `make sdk-prune sdk-release-verify`
+/// still runs the prune work only once.
+fn add_custom_phase_target(
+    makefile: &mut String,
+    phase: &str,
+    phase_target: Option<&config::SdkTarget>,
+    extra_deps: &[String],
+    phases: &[String],
+) {
+    let resolved: Vec<String> = phase_target
+        .and_then(|t| t.depends_on())
+        .unwrap_or(&[])
+        .iter()
+        .map(|d| config::resolve_phase_dependency(d, phases))
+        .collect();
+
+    let resolved_target = phase_target.map(|t| config::SdkTarget::CommandsWithDeps {
+        commands: t.commands().to_vec(),
+        depends_on: (!resolved.is_empty()).then(|| resolved.clone()),
+    });
+    add_phase_target(makefile, phase, resolved_target.as_ref(), extra_deps, None);
+    add_fragment_ordering(makefile, extra_deps, &resolved);
+}
+
+/// Give every discovered `<git>-<phase>` target (`fragment_targets`) the
+/// phase's own `depends_on` entries as prerequisites, so under `make -j`
+/// the fragment work never starts before what the phase depends on has
+/// finished. Used for standard and custom phases alike. Must be called
+/// right after [`add_phase_target`], whose trailing blank line it keeps
+/// at the end of the block.
+fn add_fragment_ordering(makefile: &mut String, fragment_targets: &[String], deps: &[String]) {
+    if deps.is_empty() || fragment_targets.is_empty() {
+        return;
+    }
+    makefile.pop();
+    for target in fragment_targets {
+        makefile.push_str(&format!("{}: {}\n", target, deps.join(" ")));
+    }
     makefile.push('\n');
 }
 
@@ -2948,5 +3010,129 @@ mod tests {
             "Expected sdk-help to depend on the discovered u-boot-help fragment, got:\n{}",
             makefile
         );
+    }
+
+    fn custom_phase_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let build_dir = tmp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("create build dir");
+        std::fs::write(
+            build_dir.join("release-tools.mk"),
+            "release-tools-prune:\n\t@echo prune\n\
+             release-tools-release-verify:\n\t@echo verify\n\
+             release-tools-release-deliver:\n\t@echo deliver\n",
+        )
+        .expect("write release-tools.mk");
+        tmp
+    }
+
+    fn release_tools_config(phases_yaml: &str) -> config::SdkConfig {
+        let yaml = format!(
+            "gits:\n  - name: release-tools\n    url: https://example.com/r.git\n    commit: main\n{}",
+            phases_yaml
+        );
+        noyalib::from_str(&yaml).expect("valid sdk.yml")
+    }
+
+    #[test]
+    fn test_generate_makefile_custom_phase_plain_list_unchanged() {
+        let tmp = custom_phase_workspace();
+        let config = release_tools_config("phases: [prune, release-verify, release-deliver]\n");
+        let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
+        assert!(makefile.contains("sdk-prune: release-tools-prune\n\n"));
+        assert!(makefile.contains("sdk-release-verify: release-tools-release-verify\n\n"));
+        assert!(makefile.contains("sdk-release-deliver: release-tools-release-deliver\n\n"));
+        // No ordering lines are added without depends_on.
+        assert!(!makefile.contains("release-tools-release-verify: "));
+    }
+
+    #[test]
+    fn test_generate_makefile_custom_phase_depends_on_and_commands() {
+        let tmp = custom_phase_workspace();
+        let config = release_tools_config(
+            r#"phases:
+  - prune
+  - name: release-verify
+    depends_on: [prune]
+  - name: release-deliver
+    depends_on: [release-verify]
+    commands:
+      - "@echo delivered ${{ TAG }}"
+"#,
+        );
+        let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
+        assert!(
+            makefile.contains(
+                "sdk-release-verify: sdk-prune release-tools-release-verify\n\
+                 release-tools-release-verify: sdk-prune\n\n"
+            ),
+            "got:\n{}",
+            makefile
+        );
+        assert!(
+            makefile.contains(
+                "sdk-release-deliver: sdk-release-verify release-tools-release-deliver\n\
+                 \t@echo delivered $(TAG)\n\
+                 release-tools-release-deliver: sdk-release-verify\n\n"
+            ),
+            "got:\n{}",
+            makefile
+        );
+        assert!(makefile
+            .contains(".PHONY: all sdk-help sdk-prune sdk-release-verify sdk-release-deliver\n"));
+    }
+
+    #[test]
+    fn test_generate_makefile_standard_phase_orders_fragments_after_depends_on() {
+        // build depends on a custom phase: rt-build must not start while
+        // sdk-prune is still running under make -j.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let build_dir = tmp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("create build dir");
+        std::fs::write(
+            build_dir.join("rt.mk"),
+            "rt-prune:\n\t@echo prune\nrt-build:\n\t@echo build\n",
+        )
+        .expect("write rt.mk");
+        let config: config::SdkConfig = noyalib::from_str(
+            "gits:\n  - name: rt\n    url: https://example.com/rt.git\n    commit: main\n\
+             build:\n  depends_on: [sdk-prune]\nphases: [prune]\n",
+        )
+        .expect("valid sdk.yml");
+        let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
+        assert!(
+            makefile.contains("sdk-build: sdk-prune rt-build\nrt-build: sdk-prune\n\n"),
+            "got:\n{}",
+            makefile
+        );
+        // A phase without depends_on gets no ordering lines.
+        assert!(
+            makefile.contains("sdk-prune: rt-prune\n\n"),
+            "got:\n{}",
+            makefile
+        );
+        assert!(!makefile.contains("rt-prune: "), "got:\n{}", makefile);
+    }
+
+    #[test]
+    fn test_generate_makefile_custom_phase_without_fragments() {
+        // Commands/depends_on alone are enough to generate the target.
+        let config = release_tools_config(
+            r#"phases:
+  - prune
+  - name: release-verify
+    depends_on: [prune]
+    commands: ["@echo verify"]
+"#,
+        );
+        let makefile = generate_makefile_content(&config, false, None);
+        assert!(
+            makefile.contains("sdk-release-verify: sdk-prune\n\t@echo verify\n\n"),
+            "got:\n{}",
+            makefile
+        );
+        assert!(makefile
+            .lines()
+            .any(|l| l.starts_with(".PHONY:") && l.contains(" sdk-release-verify")));
     }
 }

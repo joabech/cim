@@ -2169,6 +2169,19 @@ pub(crate) fn filtered_sdk_config_for_makefile(
         .filter(|r| !surviving_install_refs.contains(r))
         .collect();
 
+    // Custom phases (`phases:` mappings) are never removed either, so strip
+    // both dangling install-<name> references and references to gits that
+    // were filtered out (a git name in a custom phase's depends_on is a
+    // prerequisite on that git's own target, which is gone now). A name
+    // that is also a phase resolves to sdk-<phase> and is kept.
+    let phase_names = sdk_config.phases();
+    let stale_refs: std::collections::HashSet<String> = sdk_config
+        .gits
+        .iter()
+        .map(|g| g.name.clone())
+        .filter(|n| !git_names.contains(n.as_str()) && !phase_names.contains(n))
+        .chain(removed_install_refs.iter().cloned())
+        .collect();
     if !removed_install_refs.is_empty() {
         strip_removed_install_refs_from_target(&mut filtered.envsetup, &removed_install_refs);
         strip_removed_install_refs_from_target(&mut filtered.build, &removed_install_refs);
@@ -2180,6 +2193,12 @@ pub(crate) fn filtered_sdk_config_for_makefile(
             if let Some(deps) = &mut git.build_depends_on {
                 deps.retain(|d| !removed_install_refs.contains(d));
             }
+        }
+    }
+
+    if !stale_refs.is_empty() {
+        for entry in filtered.phases.iter_mut().flatten() {
+            strip_removed_install_refs_from_target(&mut entry.target, &stale_refs);
         }
     }
 
@@ -3030,6 +3049,56 @@ gits:
              but the (now also gone) zephyr git name is left untouched -- \
              build_depends_on validation runs pre-filter, this only guards \
              the install-side dangling reference"
+        );
+    }
+
+    #[test]
+    fn test_filtered_sdk_config_for_makefile_strips_dangling_custom_phase_depends_on() {
+        // A custom phase depending on an install step tied to an excluded
+        // git, and on that git itself: both references must go, or
+        // `make sdk-deliver` fails with "No rule to make target".
+        let yaml = r#"
+gits:
+  - name: opt
+    url: https://example.com/opt.git
+    commit: main
+    group: [extra]
+    build: [make]
+  - name: rt
+    url: https://example.com/rt.git
+    commit: main
+    build: [make]
+install:
+  - name: tool
+    commands: echo tool
+    depends_on_gits: [opt]
+phases:
+  - prune
+  - name: deliver
+    depends_on: [install-tool, opt, rt, prune]
+"#;
+        let sdk_config: config::SdkConfig = noyalib::from_str(yaml).unwrap();
+        let filtered =
+            filtered_sdk_config_for_makefile(&sdk_config, &None, &[], &["extra".to_string()]);
+        assert_eq!(
+            filtered
+                .phase_target("deliver")
+                .unwrap()
+                .depends_on()
+                .unwrap(),
+            ["rt".to_string(), "prune".to_string()]
+        );
+
+        // Without filtering nothing is stripped.
+        let unfiltered = filtered_sdk_config_for_makefile(&sdk_config, &None, &[], &[]);
+        assert_eq!(
+            unfiltered
+                .phase_target("deliver")
+                .unwrap()
+                .depends_on()
+                .unwrap()
+                .len(),
+            4
         );
     }
 
