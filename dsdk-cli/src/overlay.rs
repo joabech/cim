@@ -738,6 +738,10 @@ pub fn validate_dependencies(config: &SdkConfig) -> Result<(), String> {
         }
     }
 
+    if let Err(e) = crate::config::validate_phases(config) {
+        errors.push(e);
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {

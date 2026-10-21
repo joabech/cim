@@ -474,6 +474,64 @@ fn test_apply_overlay_merges_own_entries_and_overrides_scalars() {
 }
 
 #[test]
+fn test_apply_overlay_removed_git_used_by_phase_names_git() {
+    // Removing a git that a base phase depends on must be reported as an
+    // unknown git/phase/install name, not as an unknown phase.
+    let mut base = create_minimal_sdk_config();
+    let mut rt = new_git("rt", "https://example.com/rt.git", "main");
+    rt.build = Some(vec!["make".to_string()]);
+    base.gits = vec![rt];
+    base.phases =
+        Some(noyalib::from_str("- prune\n- name: deliver\n  depends_on: [rt, prune]\n").unwrap());
+    let derived = create_minimal_sdk_config();
+    let overlay = OverlayConfig {
+        gits: Some(GitsOverlay {
+            remove: vec!["rt".to_string()],
+            modify: vec![],
+        }),
+        toolchains: None,
+        install: None,
+        copy_files: None,
+        variables: None,
+    };
+
+    let merged = apply_overlay(base, derived, &overlay).expect("apply_overlay should succeed");
+    let err = validate_dependencies(&merged).unwrap_err();
+    assert!(
+        err.contains(
+            "phase 'deliver': depends_on references unknown phase, git or install target 'rt'"
+        ),
+        "got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_apply_overlay_derived_phases_replace_base_phases() {
+    // `phases:` is not merged: a derived target's list replaces the base's.
+    let mut base = create_minimal_sdk_config();
+    base.phases = Some(noyalib::from_str("- prune\n- release\n").unwrap());
+    let mut derived = create_minimal_sdk_config();
+    derived.phases = Some(noyalib::from_str("- lint\n").unwrap());
+    let overlay = OverlayConfig {
+        gits: None,
+        toolchains: None,
+        install: None,
+        copy_files: None,
+        variables: None,
+    };
+    let merged = apply_overlay(base, derived, &overlay).unwrap();
+    let names: Vec<&str> = merged
+        .phases
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["lint"]);
+}
+
+#[test]
 fn test_apply_overlay_own_collision_with_base_errors() {
     let base = create_complex_sdk_config();
     let mut derived = create_minimal_sdk_config();

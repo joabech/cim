@@ -162,6 +162,333 @@ impl SdkTarget {
     }
 }
 
+/// One entry of the top-level `phases:` list in `sdk.yml`.
+///
+/// Accepts either a plain phase name (the original form, still the
+/// common case) or a mapping that additionally gives the custom phase
+/// its own recipe and phase-level ordering, using the same `commands` /
+/// `depends_on` keys the standard phase blocks (`build:`, `test:`, ...)
+/// use:
+///
+/// ```yaml
+/// phases:
+///   - prune
+///   - name: release-verify
+///     depends_on: [prune]
+///   - name: release-deliver
+///     depends_on: [release-verify]
+///     commands:
+///       - '@echo "delivered"'
+/// ```
+///
+/// A `depends_on` entry naming a phase (`prune`, or `sdk-prune`) becomes
+/// a prerequisite on `sdk-<phase>`; a git name or `install-<name>` is
+/// passed through verbatim, exactly like standard-phase `depends_on`.
+/// See [`validate_phases`] for the checks applied.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(from = "RawPhaseEntry", into = "RawPhaseEntry")]
+pub struct PhaseEntry {
+    pub name: String,
+    /// Recipe/ordering for `sdk-<name>`; `None` for the plain-string form
+    /// (or a mapping with neither `commands` nor `depends_on`).
+    pub target: Option<SdkTarget>,
+}
+
+impl PhaseEntry {
+    pub fn depends_on(&self) -> &[String] {
+        self.target
+            .as_ref()
+            .and_then(|t| t.depends_on())
+            .unwrap_or(&[])
+    }
+}
+
+impl From<&str> for PhaseEntry {
+    fn from(name: &str) -> Self {
+        PhaseEntry {
+            name: name.to_string(),
+            target: None,
+        }
+    }
+}
+
+impl From<String> for PhaseEntry {
+    fn from(name: String) -> Self {
+        PhaseEntry { name, target: None }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum RawPhaseEntry {
+    Name(String),
+    Detailed(RawPhaseDetails),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawPhaseDetails {
+    name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string_or_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
+    commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    depends_on: Option<Vec<String>>,
+}
+
+impl From<RawPhaseEntry> for PhaseEntry {
+    fn from(raw: RawPhaseEntry) -> Self {
+        match raw {
+            RawPhaseEntry::Name(name) => PhaseEntry { name, target: None },
+            RawPhaseEntry::Detailed(d) => {
+                let commands = d.commands.unwrap_or_default();
+                let depends_on = d.depends_on.filter(|v| !v.is_empty());
+                let target = if commands.is_empty() && depends_on.is_none() {
+                    None
+                } else {
+                    Some(SdkTarget::CommandsWithDeps {
+                        commands,
+                        depends_on,
+                    })
+                };
+                PhaseEntry {
+                    name: d.name,
+                    target,
+                }
+            }
+        }
+    }
+}
+
+impl From<PhaseEntry> for RawPhaseEntry {
+    fn from(entry: PhaseEntry) -> Self {
+        match entry.target {
+            None => RawPhaseEntry::Name(entry.name),
+            Some(target) => {
+                let commands = target.commands().to_vec();
+                RawPhaseEntry::Detailed(RawPhaseDetails {
+                    name: entry.name,
+                    commands: (!commands.is_empty()).then_some(commands),
+                    depends_on: target.depends_on().map(|d| d.to_vec()),
+                })
+            }
+        }
+    }
+}
+
+/// Resolve one custom-phase `depends_on` entry to the Make prerequisite it
+/// stands for: a known phase name (`prune` or `sdk-prune`) becomes
+/// `sdk-<phase>`, anything else is returned verbatim (git or install
+/// target, validated by [`validate_phases`]).
+pub fn resolve_phase_dependency(dep: &str, phases: &[String]) -> String {
+    if phases.iter().any(|p| p == dep) {
+        format!("sdk-{}", dep)
+    } else {
+        dep.to_string()
+    }
+}
+
+/// Map a Make prerequisite back to the phase it names, if any.
+fn phase_of_dependency<'a>(dep: &'a str, phases: &[String]) -> Option<&'a str> {
+    if phases.iter().any(|p| p == dep) {
+        return Some(dep);
+    }
+    dep.strip_prefix("sdk-")
+        .filter(|p| phases.iter().any(|known| known == p))
+}
+
+/// A phase name becomes part of the `sdk-<phase>` Make target and of
+/// `<git>-<phase>` fragment target names: `[A-Za-z0-9][A-Za-z0-9._-]*`.
+fn is_valid_phase_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Validate the `phases:` list of a fully merged configuration:
+///
+/// - Phase names must match `[A-Za-z0-9][A-Za-z0-9._-]*`.
+/// - `commands`/`depends_on` may only be given to custom phases (standard
+///   phases are configured through their own top-level block), and only
+///   once per phase name.
+/// - Every custom-phase `depends_on` entry must name a phase (bare or
+///   `sdk-` prefixed), a git that has a Make target (`build:` or
+///   `build_depends_on:`), or an `install-<name>` target.
+/// - Phase ordering (custom-phase `depends_on`, plus `sdk-<phase>` entries
+///   in standard-phase `depends_on`) must be acyclic.
+///
+/// All problems are collected into a single error message.
+pub fn validate_phases(config: &SdkConfig) -> Result<(), String> {
+    let Some(entries) = &config.phases else {
+        return Ok(());
+    };
+    let phases = config.phases();
+    let standard = default_phases();
+    let mut errors = Vec::new();
+
+    for entry in entries.iter().filter(|e| !is_valid_phase_name(&e.name)) {
+        errors.push(format!(
+            "phase '{}': invalid name; phase names must start with a letter or \
+             digit and contain only letters, digits, '.', '_' and '-'",
+            entry.name
+        ));
+    }
+
+    let mut configured: HashSet<&str> = HashSet::new();
+    for entry in entries.iter().filter(|e| e.target.is_some()) {
+        if standard.contains(&entry.name) {
+            errors.push(format!(
+                "phase '{}': is a standard phase; configure it with the top-level \
+                 '{}:' block instead of commands/depends_on in 'phases:'",
+                entry.name, entry.name
+            ));
+        }
+        if !configured.insert(entry.name.as_str()) {
+            errors.push(format!(
+                "phase '{}': commands/depends_on given more than once in 'phases:'",
+                entry.name
+            ));
+        }
+    }
+
+    let git_names: HashSet<&str> = config.gits.iter().map(|g| g.name.as_str()).collect();
+    // Only a git with `build:` or `build_depends_on:` gets a Make target of
+    // its own (see makefile::add_makefile_target), so only those can be
+    // depended upon.
+    let git_targets: HashSet<&str> = config
+        .gits
+        .iter()
+        .filter(|g| g.build.is_some() || g.build_depends_on.is_some())
+        .map(|g| g.name.as_str())
+        .collect();
+    let install_targets: HashSet<String> = config
+        .install
+        .as_ref()
+        .map(|i| i.iter().map(|i| format!("install-{}", i.name)).collect())
+        .unwrap_or_default();
+
+    // Dependency graph over Make target names (sdk-<phase>, git names,
+    // install-<name>), used for cycle detection. Gits and install steps
+    // are included because a phase can depend on a git whose
+    // build_depends_on leads back to the phase; make would only warn and
+    // drop such a circular dependency.
+    let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in entries {
+        for dep in entry.depends_on() {
+            let known = phase_of_dependency(dep, &phases).is_some()
+                || git_targets.contains(dep.as_str())
+                || install_targets.contains(dep);
+            if known {
+                // A phase, a git with a Make target or an install step.
+            } else if git_names.contains(dep.as_str()) {
+                errors.push(format!(
+                    "phase '{}': depends_on names git '{}', which has no Make target \
+                     (give it a 'build:' or 'build_depends_on:' entry)",
+                    entry.name, dep
+                ));
+            } else {
+                errors.push(format!(
+                    "phase '{}': depends_on references unknown phase, git or \
+                     install target '{}' (known phases: {})",
+                    entry.name,
+                    dep,
+                    phases.join(", ")
+                ));
+            }
+            graph
+                .entry(format!("sdk-{}", entry.name))
+                .or_default()
+                .push(resolve_phase_dependency(dep, &phases));
+        }
+    }
+    for phase in &standard {
+        let deps = config
+            .phase_target(phase)
+            .and_then(|t| t.depends_on())
+            .unwrap_or(&[]);
+        graph
+            .entry(format!("sdk-{}", phase))
+            .or_default()
+            .extend(deps.iter().cloned());
+    }
+    for git in &config.gits {
+        if let Some(deps) = &git.build_depends_on {
+            graph
+                .entry(git.name.clone())
+                .or_default()
+                .extend(deps.iter().cloned());
+        }
+    }
+    for install in config.install.iter().flatten() {
+        if let Some(deps) = &install.depends_on {
+            graph
+                .entry(format!("install-{}", install.name))
+                .or_default()
+                .extend(deps.iter().map(|d| format!("install-{}", d)));
+        }
+    }
+    let phase_nodes: Vec<String> = phases.iter().map(|p| format!("sdk-{}", p)).collect();
+
+    if let Some(cycle) = find_phase_cycle(&graph, &phase_nodes) {
+        errors.push(format!("phase dependency cycle: {}", cycle.join(" -> ")));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Invalid 'phases:' configuration:\n  - {}",
+            errors.join("\n  - ")
+        ))
+    }
+}
+
+/// Find a dependency cycle through one of `start_nodes` (the
+/// `sdk-<phase>` targets); returns the cycle path with the first node
+/// repeated at the end. Cycles that only involve gits/install steps are not
+/// reported here.
+fn find_phase_cycle(
+    graph: &BTreeMap<String, Vec<String>>,
+    start_nodes: &[String],
+) -> Option<Vec<String>> {
+    fn reach(
+        node: &str,
+        goal: &str,
+        graph: &BTreeMap<String, Vec<String>>,
+        path: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) -> bool {
+        for next in graph.get(node).into_iter().flatten() {
+            if next == goal {
+                path.push(next.clone());
+                return true;
+            }
+            if seen.insert(next.clone()) {
+                path.push(next.clone());
+                if reach(next, goal, graph, path, seen) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        false
+    }
+
+    let mut starts: Vec<&String> = start_nodes.iter().collect();
+    starts.sort();
+    for start in starts {
+        let mut path = vec![start.clone()];
+        let mut seen = HashSet::new();
+        if reach(start, start, graph, &mut path, &mut seen) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Custom deserializer for SDK targets that handles legacy array, multiline strings, and new object format
 fn deserialize_sdk_target<'de, D>(deserializer: D) -> Result<Option<SdkTarget>, D::Error>
 where
@@ -401,8 +728,10 @@ pub trait SdkConfigCore {
     /// add *extra* custom phases (e.g. `deploy`, `lint`) on top of the
     /// standard set.
     fn phases(&self) -> Vec<String>;
-    /// Look up the top-level SDK target for a given phase name.
-    /// Returns `None` when the phase is not defined in `sdk.yml`.
+    /// Look up the SDK target (commands/depends_on) for a given phase name:
+    /// the top-level block for a standard phase, or the mapping form of a
+    /// `phases:` entry for a custom phase. Returns `None` when the phase has
+    /// no such configuration in `sdk.yml`.
     fn phase_target(&self, phase: &str) -> Option<&SdkTarget>;
     fn envsetup(&self) -> &Option<SdkTarget>;
     fn test(&self) -> &Option<SdkTarget>;
@@ -1053,12 +1382,13 @@ pub struct SdkConfig {
     /// In YAML commands, use `${{ VAR }}` to reference these variables.
     #[serde(default)]
     pub variables: Option<HashMap<String, String>>,
-    /// Ordered list of phase names.
+    /// Ordered list of extra (custom) phases.
     /// Controls which `sdk-<phase>` targets are generated and which
-    /// `<repo>-<phase>` overlay targets are auto-discovered.
-    /// When absent the default `[envsetup, build, clean, test, flash]` is used.
+    /// `<repo>-<phase>` overlay targets are auto-discovered, on top of the
+    /// six standard phases. Entries are plain names or mappings with
+    /// `name`, `commands` and `depends_on` (see [`PhaseEntry`]).
     #[serde(default)]
-    pub phases: Option<Vec<String>>,
+    pub phases: Option<Vec<PhaseEntry>>,
     /// Optional direnv integration — generates .envrc and creates a Python venv.
     #[serde(default)]
     pub direnv: Option<DirenvConfig>,
@@ -1085,8 +1415,8 @@ impl SdkConfigCore for SdkConfig {
         let mut result = default_phases();
         if let Some(extra) = &self.phases {
             for phase in extra {
-                if !result.contains(phase) {
-                    result.push(phase.clone());
+                if !result.contains(&phase.name) {
+                    result.push(phase.name.clone());
                 }
             }
         }
@@ -1101,7 +1431,13 @@ impl SdkConfigCore for SdkConfig {
             "build" => self.build.as_ref(),
             "flash" => self.flash.as_ref(),
             "help" => self.help.as_ref(),
-            _ => None,
+            custom => self
+                .phases
+                .as_ref()?
+                .iter()
+                .find(|p| p.name == custom && p.target.is_some())?
+                .target
+                .as_ref(),
         }
     }
 
@@ -1176,6 +1512,9 @@ fn enhance_config_error(
                 }
             }
         }
+        if let Some(msg) = describe_phases_error(map) {
+            return format!("Config validation error in {}: {}", path.display(), msg);
+        }
     }
 
     format!(
@@ -1183,6 +1522,45 @@ fn enhance_config_error(
         path.display(),
         original_error
     )
+}
+
+/// Explain why a `phases:` list failed to parse, if a mapping entry is the
+/// cause (missing `name`, or keys other than `name`/`commands`/`depends_on`).
+fn describe_phases_error(map: &noyalib::Mapping) -> Option<String> {
+    let noyalib::Value::Sequence(entries) = map.get("phases")? else {
+        return None;
+    };
+    for (idx, entry) in entries.iter().enumerate() {
+        let noyalib::Value::Mapping(entry) = entry else {
+            continue;
+        };
+        let known = ["name", "commands", "depends_on"];
+        let unknown: Vec<&str> = entry
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|k| !known.contains(k))
+            .collect();
+        let label = entry
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|n| format!("'{}'", n))
+            .unwrap_or_else(|| format!("#{}", idx + 1));
+        if !unknown.is_empty() {
+            return Some(format!(
+                "'phases' entry {} has unrecognized field(s): {}. \
+                 Valid fields are: name, commands, depends_on",
+                label,
+                unknown.join(", ")
+            ));
+        }
+        if entry.get("name").and_then(|n| n.as_str()).is_none() {
+            return Some(format!(
+                "'phases' entry {} is a mapping without a 'name' string",
+                label
+            ));
+        }
+    }
+    None
 }
 
 /// Load SDK configuration from a YAML file with include support.
@@ -3063,5 +3441,303 @@ default_source = "https://example.com/manifests"
             Some(("token".to_string(), "xyz789".to_string()))
         );
         std::env::remove_var("TEST_TOOLCHAIN_TOKEN2");
+    }
+
+    fn parse_sdk(yaml: &str) -> SdkConfig {
+        noyalib::from_str(yaml).expect("valid sdk.yml")
+    }
+
+    #[test]
+    fn test_phases_plain_strings_backward_compatible() {
+        let config = parse_sdk("phases:\n  - prune\n  - release-verify\n");
+        let entries = config.phases.as_ref().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.target.is_none()));
+        assert_eq!(
+            config.phases()[6..],
+            ["prune".to_string(), "release-verify".to_string()]
+        );
+        assert!(config.phase_target("prune").is_none());
+        assert!(validate_phases(&config).is_ok());
+    }
+
+    #[test]
+    fn test_phases_mapping_entries() {
+        let config = parse_sdk(
+            r#"
+phases:
+  - prune
+  - name: release-verify
+    depends_on: [prune]
+  - name: release-deliver
+    depends_on:
+      - release-verify
+    commands: |
+      @echo one
+      @echo two
+  - name: lint
+"#,
+        );
+        assert_eq!(
+            config.phases()[6..],
+            ["prune", "release-verify", "release-deliver", "lint"].map(String::from)
+        );
+        let verify = config.phase_target("release-verify").unwrap();
+        assert!(verify.commands().is_empty());
+        assert_eq!(verify.depends_on().unwrap(), ["prune".to_string()]);
+        let deliver = config.phase_target("release-deliver").unwrap();
+        assert_eq!(deliver.commands(), ["@echo one", "@echo two"]);
+        assert_eq!(
+            deliver.depends_on().unwrap(),
+            ["release-verify".to_string()]
+        );
+        // A mapping with only a name is equivalent to the plain form.
+        assert!(config.phase_target("lint").is_none());
+        assert!(validate_phases(&config).is_ok());
+    }
+
+    #[test]
+    fn test_phases_mapping_rejects_unknown_fields() {
+        let result: Result<SdkConfig, _> =
+            noyalib::from_str("phases:\n  - name: prune\n    bogus: 1\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_phases_serialize_round_trip_keeps_plain_form() {
+        let config =
+            parse_sdk("phases:\n  - prune\n  - name: release-verify\n    depends_on: [prune]\n");
+        let yaml = noyalib::to_string(&config.phases).unwrap();
+        assert!(yaml.contains("- prune"), "got:\n{}", yaml);
+        let back: Vec<PhaseEntry> = noyalib::from_str(&yaml).unwrap();
+        assert!(back[0].target.is_none());
+        assert_eq!(back[1].depends_on(), ["prune".to_string()]);
+    }
+
+    #[test]
+    fn test_validate_phases_unknown_dependency() {
+        let config = parse_sdk("phases:\n  - name: release-verify\n    depends_on: [prnue]\n");
+        let err = validate_phases(&config).unwrap_err();
+        assert!(
+            err.contains(
+                "phase 'release-verify': depends_on references unknown phase, \
+                 git or install target 'prnue'"
+            ),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_phases_accepts_sdk_prefix_git_and_install_targets() {
+        let config = parse_sdk(
+            r#"
+phases:
+  - prune
+  - name: release-verify
+    depends_on: [sdk-prune, sdk-build, release-tools, install-protoc]
+gits:
+  - name: release-tools
+    url: https://example.com/release-tools.git
+    commit: main
+    build: [make]
+install:
+  - name: protoc
+    commands: echo hi
+"#,
+        );
+        assert!(validate_phases(&config).is_ok());
+        let phases = config.phases();
+        assert_eq!(resolve_phase_dependency("prune", &phases), "sdk-prune");
+        assert_eq!(resolve_phase_dependency("sdk-prune", &phases), "sdk-prune");
+        assert_eq!(
+            resolve_phase_dependency("release-tools", &phases),
+            "release-tools"
+        );
+    }
+
+    #[test]
+    fn test_validate_phases_rejects_git_without_make_target() {
+        // A git only gets a Make target with build: or build_depends_on:,
+        // so depending on any other git would fail in make.
+        let yaml = r#"
+gits:
+  - name: nobuild
+    url: https://example.com/nobuild.git
+    commit: main
+  - name: deps-only
+    url: https://example.com/deps-only.git
+    commit: main
+    build_depends_on: [nobuild]
+phases:
+  - name: deliver
+    depends_on: [nobuild, deps-only]
+"#;
+        let err = validate_phases(&parse_sdk(yaml)).unwrap_err();
+        assert!(
+            err.contains(
+                "phase 'deliver': depends_on names git 'nobuild', which has no Make target"
+            ),
+            "got: {}",
+            err
+        );
+        assert!(!err.contains("deps-only"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_phases_detects_cycles() {
+        let config = parse_sdk(
+            r#"
+phases:
+  - name: a
+    depends_on: [c]
+  - name: b
+    depends_on: [a]
+  - name: c
+    depends_on: [b]
+"#,
+        );
+        let err = validate_phases(&config).unwrap_err();
+        assert!(
+            err.contains("phase dependency cycle: sdk-a -> sdk-c -> sdk-b -> sdk-a"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_phases_detects_self_and_standard_phase_cycles() {
+        let config = parse_sdk("phases:\n  - name: a\n    depends_on: [a]\n");
+        assert!(validate_phases(&config)
+            .unwrap_err()
+            .contains("sdk-a -> sdk-a"));
+
+        // Cycle through a standard phase's own depends_on.
+        let config = parse_sdk(
+            r#"
+build:
+  depends_on: [sdk-prune]
+phases:
+  - name: prune
+    depends_on: [build]
+"#,
+        );
+        let err = validate_phases(&config).unwrap_err();
+        assert!(err.contains("phase dependency cycle"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_phases_detects_cycles_through_gits_and_installs() {
+        // deliver -> git rt -> sdk-deliver: make would silently drop it.
+        let config = parse_sdk(
+            r#"
+gits:
+  - name: rt
+    url: https://example.com/rt.git
+    commit: main
+    build: ["@echo rt"]
+    build_depends_on: [sdk-deliver]
+phases:
+  - name: deliver
+    depends_on: [rt]
+"#,
+        );
+        let err = validate_phases(&config).unwrap_err();
+        assert!(
+            err.contains("phase dependency cycle: sdk-deliver -> rt -> sdk-deliver"),
+            "got: {}",
+            err
+        );
+
+        // Through a standard phase, a git and an install step.
+        let config = parse_sdk(
+            r#"
+gits:
+  - name: rt
+    url: https://example.com/rt.git
+    commit: main
+    build_depends_on: [install-b]
+install:
+  - name: a
+    commands: echo a
+  - name: b
+    commands: echo b
+    depends_on: [a]
+build:
+  depends_on: [sdk-prune]
+phases:
+  - name: prune
+    depends_on: [rt]
+"#,
+        );
+        assert!(validate_phases(&config).is_ok());
+        let mut config = config;
+        config.install.as_mut().unwrap()[0].depends_on = Some(vec!["b".into()]);
+        // install-a <-> install-b is a cycle not involving a phase: left to
+        // make, not reported as a phase cycle...
+        assert!(validate_phases(&config).is_ok());
+        // ...but one through a phase is.
+        config.gits[0].build_depends_on = Some(vec!["sdk-build".into()]);
+        let err = validate_phases(&config).unwrap_err();
+        assert!(
+            err.contains("sdk-build -> sdk-prune -> rt -> sdk-build"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_phases_rejects_invalid_names() {
+        let config = parse_sdk(
+            r#"
+phases:
+  - "a b"
+  - name: ""
+    commands: ["@echo x"]
+  - -lint
+  - name: "x:y"
+  - release-verify
+  - v1.2_rc
+  - 2nd
+"#,
+        );
+        let err = validate_phases(&config).unwrap_err();
+        for bad in ["'a b'", "''", "'-lint'", "'x:y'"] {
+            assert!(
+                err.contains(&format!("phase {}: invalid name", bad)),
+                "missing {} in: {}",
+                bad,
+                err
+            );
+        }
+        for good in ["release-verify", "v1.2_rc", "2nd"] {
+            assert!(!err.contains(&format!("'{}'", good)), "got: {}", err);
+        }
+    }
+
+    #[test]
+    fn test_validate_phases_rejects_standard_phase_and_duplicate_config() {
+        let config = parse_sdk(
+            r#"
+phases:
+  - name: build
+    commands: [make]
+  - name: prune
+    commands: [one]
+  - name: prune
+    commands: [two]
+"#,
+        );
+        let err = validate_phases(&config).unwrap_err();
+        assert!(
+            err.contains("phase 'build': is a standard phase"),
+            "got: {}",
+            err
+        );
+        assert!(
+            err.contains("phase 'prune': commands/depends_on given more than once"),
+            "got: {}",
+            err
+        );
     }
 }

@@ -2832,7 +2832,7 @@ mod tests {
                 commit: "main".to_string(),
                 ..Default::default()
             }],
-            phases: Some(vec!["deploy".to_string()]),
+            phases: Some(vec!["deploy".into()]),
             ..Default::default()
         };
 
