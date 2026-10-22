@@ -641,6 +641,10 @@ pub fn apply_overlay(
     )?;
 
     Ok(SdkConfig {
+        min_cim_version: crate::config::max_cim_version(
+            derived.min_cim_version,
+            base.min_cim_version,
+        ),
         gits,
         toolchains,
         copy_files,

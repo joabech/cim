@@ -1335,6 +1335,12 @@ where
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct SdkConfig {
+    /// Oldest cim release (`MAJOR.MINOR.PATCH`) that can use this manifest.
+    /// Checked on the raw YAML by [`load_config`], before the typed parse,
+    /// so an older cim reports it instead of a schema error. Across an
+    /// `extends:` chain the highest value applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_cim_version: Option<String>,
     #[serde(default, deserialize_with = "deserialize_gits")]
     pub gits: Vec<GitConfig>,
     #[serde(default)]
@@ -1563,7 +1569,86 @@ fn describe_phases_error(map: &noyalib::Mapping) -> Option<String> {
     None
 }
 
-/// Load SDK configuration from a YAML file with include support.
+/// Parse a `min_cim_version` value: `MAJOR.MINOR.PATCH`, all numeric.
+fn parse_cim_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let mut next = || -> Option<u64> {
+        let part = parts.next()?;
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let version = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(version)
+}
+
+/// The validated `min_cim_version` of one raw (not yet typed) sdk.yml
+/// mapping, if it has one. A value that is not a `MAJOR.MINOR.PATCH`
+/// string is an error naming `path`.
+pub fn min_cim_version_of(map: &noyalib::Mapping, path: &Path) -> Result<Option<String>, String> {
+    let Some(value) = map.get("min_cim_version") else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        Some(version) if parse_cim_version(version).is_some() => Ok(Some(version.to_string())),
+        _ => Err(format!(
+            "{}: invalid min_cim_version {}: expected a quoted MAJOR.MINOR.PATCH \
+             version such as \"1.3.0\"",
+            path.display(),
+            noyalib::to_string(value)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        )),
+    }
+}
+
+/// The higher of two (valid) `min_cim_version` values.
+pub fn max_cim_version(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            if parse_cim_version(&b) > parse_cim_version(&a) {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        }
+        (a, b) => a.or(b),
+    }
+}
+
+/// Fail unless this cim is at least `required` (a valid
+/// `min_cim_version`, declared in `path`).
+pub fn ensure_cim_version(required: &str, path: &Path) -> Result<(), String> {
+    let have = env!("CARGO_PKG_VERSION");
+    if parse_cim_version(required) > parse_cim_version(have) {
+        return Err(format!(
+            "target requires cim >= {} (you have {}); please upgrade cim \
+             (min_cim_version in {})",
+            required,
+            have,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Check the top-level `min_cim_version` of raw sdk.yml text against this
+/// cim. Text that is not a YAML mapping is left to the typed parse to
+/// report.
+fn check_min_cim_version(content: &str, path: &Path) -> Result<(), String> {
+    let Ok(noyalib::Value::Mapping(map)) = noyalib::from_str::<noyalib::Value>(content) else {
+        return Ok(());
+    };
+    match min_cim_version_of(&map, path)? {
+        Some(required) => ensure_cim_version(&required, path),
+        None => Ok(()),
+    }
+}
+
+/// Load SDK configuration from a YAML file.
+///
+/// The top-level `min_cim_version` is checked first, on the raw YAML.
 ///
 /// # Errors
 ///
@@ -1589,6 +1674,12 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<SdkConfig, Box<dyn std::er
         .map_err(|e| format!("Cannot read config file {}: {}", path_buf.display(), e))?;
 
     let preprocessed = quote_numeric_commit_values(&file_content);
+
+    // Before the typed parse: a manifest written for a newer cim may use
+    // schema this cim cannot parse, and that parse error would otherwise
+    // hide the real problem.
+    check_min_cim_version(&preprocessed, &path_buf)?;
+
     let config: SdkConfig = noyalib::from_str(&preprocessed)
         .map_err(|e| enhance_config_error(&file_content, &path_buf, &e))?;
 
@@ -3443,6 +3534,94 @@ default_source = "https://example.com/manifests"
             Some(("token".to_string(), "xyz789".to_string()))
         );
         std::env::remove_var("TEST_TOOLCHAIN_TOKEN2");
+    }
+
+    fn write_sdk(dir: &tempfile::TempDir, yaml: &str) -> PathBuf {
+        let path = dir.path().join("sdk.yml");
+        fs::write(&path, yaml).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_min_cim_version_satisfied_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_sdk(&tmp, "min_cim_version: \"1.0.0\"\ngits: []\n");
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.min_cim_version.as_deref(), Some("1.0.0"));
+        // Serialized back (release --genconfig, export of extends targets).
+        let yaml = noyalib::to_string(&config).unwrap();
+        assert!(
+            yaml.contains("min_cim_version: \"1.0.0\""),
+            "got:\n{}",
+            yaml
+        );
+        // Exactly the running version is fine as well.
+        let path = write_sdk(
+            &tmp,
+            &format!("min_cim_version: \"{}\"\n", env!("CARGO_PKG_VERSION")),
+        );
+        assert!(load_config(&path).is_ok());
+        // Absent is fine, and not serialized.
+        let path = write_sdk(&tmp, "gits: []\n");
+        let config = load_config(&path).unwrap();
+        assert!(config.min_cim_version.is_none());
+        assert!(!noyalib::to_string(&config)
+            .unwrap()
+            .contains("min_cim_version"));
+    }
+
+    #[test]
+    fn test_min_cim_version_too_new_wins_over_parse_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `gits:` in a shape this cim cannot parse: the version check must
+        // run first and report what the user can actually do about it.
+        let path = write_sdk(
+            &tmp,
+            "min_cim_version: \"999.0.0\"\ngits: {new: schema}\nphases: 42\n",
+        );
+        let err = load_config(&path).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!(
+                "target requires cim >= 999.0.0 (you have {}); please upgrade cim",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "got: {}",
+            err
+        );
+        assert!(err.contains(&path.display().to_string()), "got: {}", err);
+    }
+
+    #[test]
+    fn test_min_cim_version_unparsable_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in [
+            "1.3",
+            "\"1.3\"",
+            "\"v1.3.0\"",
+            "\"1.3.0-rc1\"",
+            "\"1.x.0\"",
+            "\"\"",
+            "[1]",
+        ] {
+            let path = write_sdk(&tmp, &format!("min_cim_version: {}\ngits: []\n", bad));
+            let err = load_config(&path).unwrap_err().to_string();
+            assert!(
+                err.contains("invalid min_cim_version"),
+                "{}: got: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_cim_version() {
+        let v = |s: &str| Some(s.to_string());
+        assert_eq!(max_cim_version(v("1.2.7"), v("1.10.0")), v("1.10.0"));
+        assert_eq!(max_cim_version(v("2.0.0"), v("1.10.0")), v("2.0.0"));
+        assert_eq!(max_cim_version(None, v("1.0.0")), v("1.0.0"));
+        assert_eq!(max_cim_version(v("1.0.0"), None), v("1.0.0"));
+        assert_eq!(max_cim_version(None, None), None);
     }
 
     fn parse_sdk(yaml: &str) -> SdkConfig {

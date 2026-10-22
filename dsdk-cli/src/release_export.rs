@@ -873,6 +873,44 @@ gits:
     }
 
     #[test]
+    fn test_export_keeps_min_cim_version() {
+        let tmp = TempDir::new().unwrap();
+        // Plain target: passed through as written.
+        let path = write(
+            tmp.path(),
+            SDK_CONFIG_FILE,
+            "min_cim_version: \"1.0.0\"\ngits:\n  - {name: g, url: u, commit: main}\n",
+        );
+        let doc = export(&path, &all, &ExportOptions::default());
+        assert_eq!(doc["min_cim_version"], parse("'1.0.0'"));
+
+        // Flattened extends chain: the highest requirement of all levels.
+        write(
+            tmp.path(),
+            &format!("{}/base-{}", OVERLAYS_DIR, SDK_CONFIG_FILE),
+            "min_cim_version: \"1.1.0\"\ngits:\n  - {name: core, url: u, commit: main}\n",
+        );
+        let path = write(
+            tmp.path(),
+            SDK_CONFIG_FILE,
+            "min_cim_version: \"1.0.0\"\nextends: base\ngits:\n  - {name: app, url: u, commit: main}\n",
+        );
+        let doc = export(&path, &all, &ExportOptions::default());
+        assert_eq!(doc["min_cim_version"], parse("'1.1.0'"));
+        let keys: Vec<_> = doc.as_mapping().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["min_cim_version", "gits"]);
+
+        // Only the base declares it.
+        let path = write(
+            tmp.path(),
+            SDK_CONFIG_FILE,
+            "extends: base\ngits:\n  - {name: app, url: u, commit: main}\n",
+        );
+        let doc = export(&path, &all, &ExportOptions::default());
+        assert_eq!(doc["min_cim_version"], parse("'1.1.0'"));
+    }
+
+    #[test]
     fn test_export_flattens_extends_and_overlay() {
         let tmp = TempDir::new().unwrap();
         write(

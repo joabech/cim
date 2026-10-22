@@ -596,6 +596,11 @@ In a target that `extends:` another one, a `phases:` list in the derived
 target replaces the base's list as a whole (it is not merged), so repeat
 the base's phases you want to keep.
 
+cim releases before the mapping form existed fail to parse such a
+manifest. Set the top-level `min_cim_version:` (see the [sdk.yml](#sdkyml)
+example) to the first release supporting it, so those users are told to
+upgrade instead.
+
 #### foreach
 
 Run command in each repo.
@@ -1026,6 +1031,23 @@ Note that this example, isn't a complete manifest, but rather a demonstration of
 
 #### sdk.yml
 ```yaml
+################################################################################
+# Minimum cim version — optional. The oldest cim release ("MAJOR.MINOR.PATCH",
+# quoted) that can use this manifest. cim checks it on the raw YAML before
+# parsing anything else, so an older cim fails with
+#   target requires cim >= 1.3.0 (you have 1.2.9); please upgrade cim
+# instead of a confusing schema error about newer syntax. Every file of an
+# extends: chain is checked and the highest value applies; it is kept when
+# cim release --genconfig / --export-manifest write a manifest. A value that
+# is not a valid version is an error.
+#
+# Releases up to and including 1.2.7 predate this key and ignore it, so it
+# only helps from the next release on. Manifests using the mapping form of
+# phases: (name/commands/depends_on) should set it to the first release that
+# supports that form.
+################################################################################
+min_cim_version: "1.3.0"
+
 ################################################################################
 # Manifest variables — optional key-value pairs that can be reused across
 # the manifest with ${{ VAR }} syntax.

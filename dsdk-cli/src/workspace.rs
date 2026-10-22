@@ -1326,6 +1326,7 @@ pub fn load_config_with_extends(
     config_path: &Path,
 ) -> Result<config::SdkConfig, Box<dyn std::error::Error>> {
     let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    check_local_chain_min_cim_version(dir, config_path)?;
     let primary = config::load_config(config_path)?;
 
     if primary.extends.is_none() {
@@ -1336,6 +1337,55 @@ pub fn load_config_with_extends(
     crate::overlay::validate_dependencies(&merged)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     Ok(merged)
+}
+
+/// Check the highest `min_cim_version` of the local `extends:` chain
+/// starting at `config_path`, reading only raw YAML. `config::load_config`
+/// checks every file on its own as well; this pass makes the error name the
+/// highest requirement rather than the first one found. Files that are
+/// missing or not YAML mappings end the walk, the typed load reports them.
+fn check_local_chain_min_cim_version(dir: &Path, config_path: &Path) -> Result<(), String> {
+    let overlays_dir = dir.join(OVERLAYS_DIR);
+    let mut path = config_path.to_path_buf();
+    let mut highest: Option<(String, PathBuf)> = None;
+    for _ in 0..32 {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            break;
+        };
+        let content = config::quote_numeric_commit_values(&content);
+        let Ok(noyalib::Value::Mapping(map)) = noyalib::from_str::<noyalib::Value>(&content) else {
+            break;
+        };
+        if let Some(version) = config::min_cim_version_of(&map, &path)? {
+            let higher = match &highest {
+                None => true,
+                Some((v, _)) => {
+                    config::max_cim_version(Some(v.clone()), Some(version.clone())).as_ref()
+                        != Some(v)
+                }
+            };
+            if higher {
+                highest = Some((version, path.clone()));
+            }
+        }
+        let base = match map.get("extends") {
+            Some(noyalib::Value::String(s)) => Some(
+                s.rsplit_once('@')
+                    .map_or(s.as_str(), |(t, _)| t)
+                    .to_string(),
+            ),
+            Some(noyalib::Value::Mapping(m)) => {
+                m.get("target").and_then(|t| t.as_str()).map(str::to_string)
+            }
+            _ => None,
+        };
+        let Some(base) = base else { break };
+        path = overlays_dir.join(format!("{}-{}", base.trim(), SDK_CONFIG_FILE));
+    }
+    match highest {
+        Some((version, path)) => config::ensure_cim_version(&version, &path),
+        None => Ok(()),
+    }
 }
 
 /// Recursively resolve `extends:` for a single already-loaded config,
@@ -1729,6 +1779,62 @@ mod tests {
         let config_path = workspace_path.join(SDK_CONFIG_FILE);
         let err = load_config_with_extends(&config_path).unwrap_err();
         assert!(err.to_string().contains(OVERLAYS_DIR));
+    }
+
+    #[test]
+    fn test_load_config_with_extends_min_cim_version_uses_highest() {
+        let (_temp_dir, workspace_path) = create_test_workspace();
+        let config_path = workspace_path.join(SDK_CONFIG_FILE);
+        let overlays_dir = workspace_path.join(OVERLAYS_DIR);
+        fs::create_dir_all(&overlays_dir).unwrap();
+        let base_path = overlays_dir.join("base-sdk-sdk.yml");
+
+        // Satisfied requirements: the merged config keeps the highest.
+        fs::write(
+            &config_path,
+            "min_cim_version: \"1.0.0\"\nextends: base-sdk@v1\n",
+        )
+        .unwrap();
+        fs::write(&base_path, "min_cim_version: \"1.1.0\"\ngits: []\n").unwrap();
+        let merged = load_config_with_extends(&config_path).unwrap();
+        assert_eq!(merged.min_cim_version.as_deref(), Some("1.1.0"));
+
+        // The error names the highest requirement in the chain (from the
+        // base), even though the primary's own one is checked first and
+        // the base uses schema this cim can't parse.
+        fs::write(
+            &config_path,
+            "min_cim_version: \"998.0.0\"\nextends: base-sdk\n",
+        )
+        .unwrap();
+        fs::write(
+            &base_path,
+            "min_cim_version: \"999.1.0\"\ngits: {from: the-future}\n",
+        )
+        .unwrap();
+        let err = load_config_with_extends(&config_path)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(&format!(
+                "target requires cim >= 999.1.0 (you have {}); please upgrade cim",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "got: {}",
+            err
+        );
+        assert!(err.contains("base-sdk-sdk.yml"), "got: {}", err);
+
+        // Structured extends form is followed too.
+        fs::write(
+            &config_path,
+            "extends:\n  target: base-sdk\n  version: v1\n",
+        )
+        .unwrap();
+        let err = load_config_with_extends(&config_path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cim >= 999.1.0"), "got: {}", err);
     }
 
     #[test]
