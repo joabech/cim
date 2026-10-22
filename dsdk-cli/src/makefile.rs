@@ -3083,6 +3083,39 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_makefile_custom_phase_standalone_steps_and_one_shot() {
+        // Standalone steps plus a one-shot phase that runs them in order
+        // with $(MAKE): no prerequisites between the steps.
+        let tmp = custom_phase_workspace();
+        let config = release_tools_config(
+            r#"phases:
+  - prune
+  - release-verify
+  - release-deliver
+  - name: release
+    commands:
+      - "@$(MAKE) --no-print-directory sdk-prune"
+      - "@$(MAKE) --no-print-directory sdk-release-verify"
+      - "@$(MAKE) --no-print-directory sdk-release-deliver"
+"#,
+        );
+        let makefile = generate_makefile_content(&config, false, Some(tmp.path()));
+        assert!(makefile.contains("sdk-release-verify: release-tools-release-verify\n\n"));
+        assert!(makefile.contains("sdk-release-deliver: release-tools-release-deliver\n\n"));
+        assert!(
+            makefile.contains(
+                "sdk-release:\n\
+                 \t@$(MAKE) --no-print-directory sdk-prune\n\
+                 \t@$(MAKE) --no-print-directory sdk-release-verify\n\
+                 \t@$(MAKE) --no-print-directory sdk-release-deliver\n\n"
+            ),
+            "got:\n{}",
+            makefile
+        );
+        assert!(!makefile.contains("release-tools-release-deliver: "));
+    }
+
+    #[test]
     fn test_generate_makefile_standard_phase_orders_fragments_after_depends_on() {
         // build depends on a custom phase: rt-build must not start while
         // sdk-prune is still running under make -j.

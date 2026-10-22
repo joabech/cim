@@ -462,9 +462,10 @@ phases:
 ```
 
 This generates `sdk-deploy`, `sdk-lint`, and `sdk-docs` targets in addition to the
-standard six. Custom phases are implemented via per-repository `.mk` fragments
-in your `build_folder` (default: `build/`). For example, add `build/myrepo.mk`
-with targets like:
+standard six. The work of a custom phase comes from per-repository `.mk`
+fragments in your `build_folder` (default: `build/`), from the phase's own
+`commands` (see the mapping form below), or both. For example, add
+`build/myrepo.mk` with targets like:
 
 ```makefile
 myrepo-deploy:
@@ -508,14 +509,60 @@ sdk-release-deliver: sdk-release-verify release-tools-release-deliver
 release-tools-release-deliver: sdk-release-verify
 ```
 
+`depends_on` has Make's meaning: `make sdk-release-deliver` always runs
+`sdk-release-verify` (and so `sdk-prune`) first. That suits cheap steps that
+should never be skipped. For expensive or stateful steps that people run one
+at a time, leave out `depends_on` and add a one-shot phase that runs them in
+order with `$(MAKE)` (command-line variables such as `CUSTOMER=acme` are
+passed on to the sub-makes):
+
+```yaml
+phases:
+  - prune
+  - release-verify
+  - release-deliver
+  - name: release                 # make sdk-release: all three, in order
+    commands:
+      - "@$(MAKE) --no-print-directory sdk-prune"
+      - "@$(MAKE) --no-print-directory sdk-release-verify"
+      - "@$(MAKE) --no-print-directory sdk-release-deliver"
+```
+
+Make has no way to say "run after X, but only if X was asked for", so
+without `depends_on` the steps are not ordered on one command line
+(`make sdk-prune sdk-release-verify` under `-j`); use the one-shot phase
+for that. Checking that an earlier step has actually passed (for example
+that what is delivered was verified) is up to the tools the steps run.
+
 A `depends_on` entry that names a phase (`prune` or `sdk-prune`, standard
 phases included) becomes a prerequisite on `sdk-<phase>`; a git name or
-`install-<name>` target is passed through verbatim. The discovered
-`<repo>-<phase>` targets get the same prerequisites, so the ordering also
-holds under `make -j`, and each phase still runs only once per `make`
-invocation. `cim makefile` rejects unknown names in `depends_on`, dependency
-cycles between phases, and `commands`/`depends_on` on a standard phase in
-`phases:` (configure those with their top-level block instead).
+`install-<name>` target is passed through verbatim. A git can only be named
+if it has a Make target of its own, i.e. a `build:` or `build_depends_on:`
+entry. The discovered `<repo>-<phase>` targets get the same prerequisites as
+their phase, for standard phases too (`build: depends_on: [sdk-prune]` gives
+`<repo>-build: sdk-prune`), so the ordering also holds under `make -j`, and
+each phase still runs only once per `make` invocation.
+
+`cim makefile` rejects:
+
+- phase names that don't match `[A-Za-z0-9][A-Za-z0-9._-]*`,
+- `depends_on` entries that are neither a phase, a git with a Make target,
+  nor an `install-<name>` target,
+- dependency cycles through a phase, also when they pass through a git's
+  `build_depends_on` (`deliver: depends_on: [rt]` with
+  `rt: build_depends_on: [sdk-deliver]`),
+- `commands`/`depends_on` on a standard phase in `phases:` (configure those
+  with their top-level block instead), and the same phase configured twice.
+
+When gits are left out of the generated Makefile by group/pattern
+filtering, references to them in a custom phase's `depends_on`, and to
+`install:` steps pruned along with them, are dropped from that phase, the
+same way dangling `install-<name>` references are dropped from the standard
+phases.
+
+In a target that `extends:` another one, a `phases:` list in the derived
+target replaces the base's list as a whole (it is not merged), so repeat
+the base's phases you want to keep.
 
 #### foreach
 
@@ -1351,7 +1398,12 @@ A derived target's `sdk.yml` carries two distinct kinds of content:
   (`build`/`test`/`clean`/`flash`/`envsetup`/`build_folder`/`direnv`/
   `phases`) are plain whole-value overrides of the base's value.
   `makefile_include:` is the one exception — it's merged additively (see
-  below), not overridden.
+  below), not overridden. In particular a derived `phases:` list replaces
+  the base's list entirely, mapping entries (`commands`/`depends_on`)
+  included; list every phase the derived target needs. If an `overlay:`
+  `gits: remove:` drops a git that an inherited phase names in
+  `depends_on`, validation reports it as an unknown phase, git or install
+  target.
 - **`overlay:`** (a key on the same `sdk.yml`): `remove:`/`modify:`
   operations against content *inherited* from the base. There is no
   `add:` here — anything new goes directly in the sections above instead.
